@@ -408,3 +408,80 @@ def test_simulator_max_500_users_and_neutral_scenario() -> None:
 
     assert [len(req["body"]["events"]) for req in captured] == [500, 500, 500]
 
+
+def test_recommendations_search_kill_switches_and_event_tracking() -> None:
+    class _MultiFlagBundle:
+        def __init__(self, flags: dict[str, _FakeFlag]) -> None:
+            self._flags = flags
+
+        def get_flag(self, key: str) -> _FakeFlag:
+            return self._flags.get(key, _FakeFlag(enabled=False, value="control"))
+
+    class _MultiSdkClient:
+        def __init__(self, mapping: dict[str, _FakeFlag]) -> None:
+            self._mapping = mapping
+            self.tracked: list[tuple[str, str]] = []
+
+        def get_identity_flags(self, identifier: str, traits: dict[str, Any] | None = None):
+            del identifier, traits
+            return _MultiFlagBundle(self._mapping)
+
+        def track_exposure_event(self, identifier: str, feature_name: str, value: str):
+            self.tracked.append(("exposure", f"{feature_name}:{value}"))
+
+        def track_event(self, identifier: str, event_name: str, **kwargs):
+            del identifier, kwargs
+            self.tracked.append(("event", event_name))
+
+        def flush_events(self):
+            return None
+
+    captured: list[dict[str, Any]] = []
+    settings = DemoSettings(FLAGSMITH_SERVER_ENV_KEY="ser.fake-key")
+    sdk = _MultiSdkClient(
+        {
+            "recommendation_engine_v2": _FakeFlag(enabled=True, value="collaborative_v2"),
+            "enable_ai_recommendations": _FakeFlag(enabled=True, value=True),
+            "smart_product_search": _FakeFlag(enabled=True, value="semantic_v2"),
+            "enable_new_search_backend": _FakeFlag(enabled=True, value=True),
+        }
+    )
+    fs_service = FlagsmithService(settings, client=sdk)
+    telemetry = TelemetryEmitter(settings, http_client=_make_mock_ingest_client(captured))
+    app = create_app(settings=settings, flagsmith_service=fs_service, telemetry=telemetry)
+
+    with TestClient(app) as client:
+        rec = client.get("/api/recommendations", params={"user_id": "shopper_42", "cart_skus": "NV-KEY-PRO"})
+        assert rec.status_code == 200
+        assert rec.json()["variation_key"] == "collaborative_v2"
+        assert len(rec.json()["products"]) >= 1
+
+        sr = client.get("/api/search", params={"user_id": "shopper_42", "q": "charging"})
+        assert sr.status_code == 200
+        assert sr.json()["variation_key"] == "semantic_v2"
+        assert any(r["sku"] == "NV-DOCK-C" for r in sr.json()["results"])
+
+        # Flip kill switches off -> safe control fallback immediately!
+        sdk._mapping["enable_ai_recommendations"] = _FakeFlag(enabled=False, value=False)
+        sdk._mapping["enable_new_search_backend"] = _FakeFlag(enabled=False, value=False)
+        rec_killed = client.get("/api/recommendations", params={"user_id": "shopper_42"})
+        assert rec_killed.json()["kill_switch_enabled"] is False
+        assert rec_killed.json()["variation_key"] == "control_kill_switch_fallback"
+        sr_killed = client.get("/api/search", params={"user_id": "shopper_42", "q": "charging"})
+        assert sr_killed.json()["kill_switch_enabled"] is False
+        assert sr_killed.json()["variation_key"] == "control_kill_switch_fallback"
+
+        trk = client.post(
+            "/api/events/track",
+            json={
+                "user_id": "shopper_42",
+                "event_type": "product_clicked_from_recommendation",
+                "flag_key": "recommendation_engine_v2",
+                "variation_key": "collaborative_v2",
+                "sku": "NV-MAT-WOOL",
+            },
+        )
+        assert trk.status_code == 200
+        assert trk.json()["tracked"] is True
+        assert trk.json()["sdk_tracked"] is True
+

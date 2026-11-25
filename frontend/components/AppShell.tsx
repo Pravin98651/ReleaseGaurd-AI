@@ -59,6 +59,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/agent", label: "AI Agent", icon: Bot, group: "delivery" },
   { href: "/repositories", label: "Repositories", icon: FolderGit2, group: "delivery" },
   { href: "/pull-requests", label: "Pull Requests", icon: GitPullRequest, group: "delivery" },
+  { href: "/flagsmith", label: "Flagsmith Hub", icon: Flag, group: "delivery" },
   { href: "/feature-flags", label: "Feature Flags", icon: Flag, group: "delivery" },
   { href: "/releases", label: "Releases", icon: Rocket, group: "delivery" },
   { href: "/experiments", label: "Experiments", icon: FlaskConical, group: "delivery" },

@@ -91,3 +91,73 @@ export async function fetchRecentTelemetry(
   }
   return res.json();
 }
+
+export interface NovaShopFeatureProduct {
+  sku: string;
+  name: string;
+  category: string;
+  tagline: string;
+  price: number;
+  score?: number;
+  relevance?: number;
+  recommendation_reason?: string;
+  match_reason?: string;
+}
+
+export async function fetchRecommendations(
+  baseUrl: string,
+  params: {
+    user_id: string;
+    cart_skus?: string[];
+    subscription_plan?: string;
+    user_type?: string;
+  },
+): Promise<{
+  flag_key: string;
+  variation_key: string;
+  kill_switch_enabled: boolean;
+  products: NovaShopFeatureProduct[];
+}> {
+  const url = new URL(`${baseUrl.replace(/\/+$/, "")}/api/recommendations`);
+  url.searchParams.set("user_id", params.user_id);
+  if (params.cart_skus?.length) url.searchParams.set("cart_skus", params.cart_skus.join(","));
+  if (params.subscription_plan) url.searchParams.set("subscription_plan", params.subscription_plan);
+  if (params.user_type) url.searchParams.set("user_type", params.user_type);
+  const res = await fetch(url.toString(), { cache: "no-store" });
+  if (!res.ok) throw new Error(`Recommendations fetch failed (${res.status})`);
+  return res.json();
+}
+
+export async function fetchSearchResults(
+  baseUrl: string,
+  params: { q: string; user_id: string },
+): Promise<{
+  flag_key: string;
+  variation_key: string;
+  kill_switch_enabled: boolean;
+  results: NovaShopFeatureProduct[];
+}> {
+  const url = new URL(`${baseUrl.replace(/\/+$/, "")}/api/search`);
+  url.searchParams.set("q", params.q);
+  url.searchParams.set("user_id", params.user_id);
+  const res = await fetch(url.toString(), { cache: "no-store" });
+  if (!res.ok) throw new Error(`Search failed (${res.status})`);
+  return res.json();
+}
+
+export async function trackStorefrontEvent(
+  baseUrl: string,
+  payload: {
+    user_id: string;
+    event_type: string;
+    flag_key: string;
+    variation_key: string;
+    sku?: string;
+  },
+): Promise<void> {
+  await fetch(`${baseUrl.replace(/\/+$/, "")}/api/events/track`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}

@@ -18,8 +18,12 @@ import {
   evaluateBackendFlag,
   fetchDemoHealth,
   fetchRecentTelemetry,
+  fetchRecommendations,
+  fetchSearchResults,
   runBackendSimulation,
   submitCheckout,
+  trackStorefrontEvent,
+  type NovaShopFeatureProduct,
 } from "@/lib/api";
 import { demoFlagsmithClient, type ClientFlagState } from "@/lib/flagsmith";
 import type {
@@ -85,6 +89,13 @@ export function NovaShopStorefront({ initialConfig }: NovaShopStorefrontProps) {
 
   const [telemetryEvents, setTelemetryEvents] = useState<TelemetryEventRecord[]>([]);
   const [totalBuffered, setTotalBuffered] = useState(0);
+  const [userType, setUserType] = useState("consumer");
+  const [subscriptionPlan, setSubscriptionPlan] = useState("free");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchAlgo, setSearchAlgo] = useState("control");
+  const [searchResults, setSearchResults] = useState<NovaShopFeatureProduct[]>([]);
+  const [recAlgo, setRecAlgo] = useState("control");
+  const [recProducts, setRecProducts] = useState<NovaShopFeatureProduct[]>([]);
 
   const refreshTelemetry = useCallback(async () => {
     try {
@@ -419,6 +430,160 @@ export function NovaShopStorefront({ initialConfig }: NovaShopStorefrontProps) {
           lastReport={simReport}
           onRunSimulation={handleRunSimulation}
         />
+
+        {/* Identity Traits, Smart Search & Recommendations Strip */}
+        <section className="grid grid-cols-1 gap-4 lg:grid-cols-12">
+          <div className="lg:col-span-6 rounded-xl border border-slate-800 bg-slate-900/75 p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="text-xs font-semibold text-white">
+                Smart Search (<span className="font-mono text-sky-400">smart_product_search</span>: {searchAlgo})
+              </div>
+              <div className="flex items-center gap-1.5 text-[11px]">
+                <select
+                  value={userType}
+                  onChange={(e) => setUserType(e.target.value)}
+                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-200"
+                >
+                  <option value="consumer">user_type: consumer</option>
+                  <option value="internal">user_type: internal</option>
+                  <option value="qa">user_type: qa</option>
+                  <option value="beta">user_type: beta</option>
+                </select>
+                <select
+                  value={subscriptionPlan}
+                  onChange={(e) => setSubscriptionPlan(e.target.value)}
+                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-slate-200"
+                >
+                  <option value="free">plan: free</option>
+                  <option value="pro">plan: pro</option>
+                  <option value="enterprise">plan: enterprise</option>
+                  <option value="beta">plan: beta</option>
+                </select>
+              </div>
+            </div>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void fetchSearchResults(initialConfig.demoApiUrl, {
+                  q: searchQuery,
+                  user_id: userId,
+                }).then((r) => {
+                  setSearchAlgo(r.variation_key);
+                  setSearchResults(r.results);
+                });
+              }}
+              className="flex gap-2"
+            >
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search (try 'keyboard', 'charging', or 'office')..."
+                className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs text-white"
+              />
+              <button
+                type="submit"
+                className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-sky-500"
+              >
+                Search
+              </button>
+            </form>
+            {searchResults.length > 0 && (
+              <div className="space-y-1.5 max-h-36 overflow-y-auto text-xs">
+                {searchResults.map((p) => (
+                  <div
+                    key={p.sku}
+                    className="flex items-center justify-between rounded border border-slate-800 bg-slate-950/70 px-2.5 py-1.5"
+                  >
+                    <div>
+                      <span className="font-medium text-white">{p.name}</span>{" "}
+                      <span className="font-mono text-[10px] text-slate-400">
+                        {p.match_reason}
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void trackStorefrontEvent(initialConfig.demoApiUrl, {
+                          user_id: userId,
+                          event_type: "search_result_clicked",
+                          flag_key: "smart_product_search",
+                          variation_key: searchAlgo,
+                          sku: p.sku,
+                        });
+                      }}
+                      className="rounded border border-sky-500/40 px-2 py-0.5 text-[11px] text-sky-300 hover:bg-sky-500/15"
+                    >
+                      Select
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="lg:col-span-6 rounded-xl border border-slate-800 bg-slate-900/75 p-4 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="text-xs font-semibold text-white">
+                Recommendations (<span className="font-mono text-emerald-400">recommendation_engine_v2</span>: {recAlgo})
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  void fetchRecommendations(initialConfig.demoApiUrl, {
+                    user_id: userId,
+                    cart_skus: cart.filter((i) => i.quantity > 0).map((i) => i.sku),
+                    subscription_plan: subscriptionPlan,
+                    user_type: userType,
+                  }).then((r) => {
+                    setRecAlgo(r.variation_key);
+                    setRecProducts(r.products);
+                  });
+                }}
+                className="rounded-lg border border-emerald-500/40 bg-emerald-500/15 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/25"
+              >
+                Load Recommendations
+              </button>
+            </div>
+            {recProducts.length === 0 ? (
+              <p className="text-xs text-slate-400">
+                Click &ldquo;Load Recommendations&rdquo; to evaluate{" "}
+                <code className="font-mono">recommendation_engine_v2</code> &amp;{" "}
+                <code className="font-mono">enable_ai_recommendations</code> kill switch.
+              </p>
+            ) : (
+              <div className="space-y-1.5 text-xs">
+                {recProducts.map((p) => (
+                  <div
+                    key={p.sku}
+                    className="flex items-center justify-between rounded border border-slate-800 bg-slate-950/70 px-2.5 py-1.5"
+                  >
+                    <div>
+                      <span className="font-medium text-white">{p.name}</span>{" "}
+                      <span className="text-[11px] text-slate-400">${p.price.toFixed(2)}</span>
+                      <div className="text-[10px] text-slate-500">{p.recommendation_reason}</div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void trackStorefrontEvent(initialConfig.demoApiUrl, {
+                          user_id: userId,
+                          event_type: "product_clicked_from_recommendation",
+                          flag_key: "recommendation_engine_v2",
+                          variation_key: recAlgo,
+                          sku: p.sku,
+                        });
+                      }}
+                      className="rounded border border-emerald-500/40 px-2 py-0.5 text-[11px] text-emerald-300 hover:bg-emerald-500/15"
+                    >
+                      Inspect
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
 
         {/* Cart + Checkout Grid */}
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">

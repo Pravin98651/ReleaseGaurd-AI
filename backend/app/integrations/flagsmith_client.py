@@ -318,6 +318,7 @@ class FlagsmithClient:
             "POST",
             f"/projects/{project_id}/features/{feature_id}/mv-options/",
             json_body={
+                "feature": feature_id,
                 "type": "unicode",
                 "string_value": value,
                 "default_percentage_allocation": default_percentage_allocation,
@@ -539,6 +540,40 @@ class FlagsmithClient:
                     segment_fs = fs
         return base_fs, segment_fs
 
+    @staticmethod
+    def _prepare_base_updates(
+        base_fs: dict[str, Any], base_updates: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Merge existing multivariate_feature_state_values IDs required by Flagsmith PATCH."""
+        payload = dict(base_updates)
+        if "multivariate_feature_state_values" not in payload:
+            return payload
+        existing_by_opt = {
+            int(item["multivariate_feature_option"]): int(item["id"])
+            for item in (base_fs.get("multivariate_feature_state_values") or [])
+            if item.get("id") is not None and item.get("multivariate_feature_option") is not None
+        }
+        merged: list[dict[str, Any]] = []
+        seen_opts: set[int] = set()
+        for item in payload["multivariate_feature_state_values"]:
+            opt_id = int(item["multivariate_feature_option"])
+            seen_opts.add(opt_id)
+            entry = dict(item)
+            if "id" not in entry and opt_id in existing_by_opt:
+                entry["id"] = existing_by_opt[opt_id]
+            merged.append(entry)
+        for opt_id, row_id in existing_by_opt.items():
+            if opt_id not in seen_opts:
+                merged.append(
+                    {
+                        "id": row_id,
+                        "multivariate_feature_option": opt_id,
+                        "percentage_allocation": 0,
+                    }
+                )
+        payload["multivariate_feature_state_values"] = merged
+        return payload
+
     async def _mutate_v1(
         self,
         env_key: str,
@@ -557,10 +592,11 @@ class FlagsmithClient:
                 raise FlagsmithAPIError(
                     404, f"Base feature state not found for feature {feature_id} in {env_key}."
                 )
+            prepared_updates = self._prepare_base_updates(base_fs, base_updates)
             resp = await self._mgmt(
                 "PATCH",
                 f"/environments/{env_key}/featurestates/{base_fs['id']}/",
-                json_body=base_updates,
+                json_body=prepared_updates,
             )
             result["base_feature_state"] = dict(resp.json())
 
@@ -676,10 +712,11 @@ class FlagsmithClient:
                 raise FlagsmithAPIError(
                     404, f"Draft base feature state missing in v2 version {version_uuid}."
                 )
+            prepared_updates = self._prepare_base_updates(base_fs, base_updates)
             await self._mgmt(
                 "PATCH",
                 f"/environments/{active_ref}/features/{feature_id}/versions/{version_uuid}/featurestates/{base_fs['id']}/",
-                json_body=base_updates,
+                json_body=prepared_updates,
             )
 
         if segment_override is not None:
@@ -1111,11 +1148,12 @@ class FlagsmithClient:
         direction: str = "up",
         description: str = "",
     ) -> dict[str, Any]:
-        """Create an experiment metric in Flagsmith for a tracked event_name."""
+        """Create an experiment metric in Flagsmith for a tracked event."""
         existing = await self.list_experiment_metrics(env_key)
         for item in existing:
             defn = item.get("definition") or {}
-            if item.get("name") == name or defn.get("event_name") == event_name:
+            ev_key = defn.get("event") or defn.get("event_name")
+            if item.get("name") == name or ev_key == event_name:
                 return item
         resp = await self._mgmt(
             "POST",
@@ -1125,7 +1163,7 @@ class FlagsmithClient:
                 "description": description or f"Metric for {event_name}",
                 "aggregation": aggregation,
                 "direction": direction,
-                "definition": {"event_name": event_name},
+                "definition": {"version": 1, "event": event_name},
             },
         )
         return dict(resp.json())
@@ -1266,6 +1304,163 @@ class FlagsmithClient:
             verify_edge=verify_edge,
         )
         return {"mutation": mutation, "verification": verification}
+
+    # ------------------------------------------------------------------
+    # Identities, Traits, Targeting Segments & Feature Metadata
+    # ------------------------------------------------------------------
+
+    async def list_edge_identities(
+        self,
+        env_key: str,
+        *,
+        q: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """List identities recorded in a Flagsmith environment."""
+        params = {"q": q} if q else None
+        resp = await self._mgmt(
+            "GET",
+            f"/environments/{env_key}/edge-identities/",
+            params=params,
+            allow_statuses={200, 404},
+        )
+        if resp.status_code == 404:
+            return []
+        return _extract_items(resp.json())
+
+    async def evaluate_identity_detailed(
+        self,
+        env_key: str,
+        *,
+        identifier: str,
+        traits: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate flags for an identity with traits via Flagsmith Edge POST /identities/."""
+        trait_list = [
+            {
+                "trait_key": str(k),
+                "trait_value": v,
+                "transient": False,
+            }
+            for k, v in (traits or {}).items()
+            if v is not None
+        ]
+        resp = await self._edge(
+            "POST",
+            "/identities/",
+            env_key=env_key,
+            json_body={"identifier": identifier, "traits": trait_list},
+        )
+        payload = dict(resp.json())
+        normalized_flags: dict[str, dict[str, Any]] = {}
+        for item in payload.get("flags") or []:
+            feat = item.get("feature") or {}
+            fname = str(feat.get("name") or "")
+            if not fname:
+                continue
+            normalized_flags[fname] = {
+                "flag_key": fname,
+                "feature_id": feat.get("id"),
+                "type": feat.get("type"),
+                "enabled": bool(item.get("enabled", False)),
+                "value": _normalize_feature_state_value(item.get("feature_state_value")),
+                "reason": item.get("reason") or "DEFAULT",
+                "variant": item.get("variant"),
+            }
+        return {
+            "identifier": payload.get("identifier", identifier),
+            "traits": payload.get("traits") or trait_list,
+            "flags": normalized_flags,
+        }
+
+    async def upsert_trait_segment(
+        self,
+        *,
+        project_id: int,
+        segment_name: str,
+        trait_conditions: list[dict[str, Any]],
+        match_type: str = "ALL",
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Create or update a trait-based targeting segment in Flagsmith."""
+        conditions = [
+            {
+                "property": str(c["property"]),
+                "operator": str(c.get("operator", "EQUAL")),
+                "value": str(c["value"]),
+            }
+            for c in trait_conditions
+        ]
+        payload = {
+            "name": segment_name,
+            "description": description or f"Managed targeting segment {segment_name}",
+            "project": project_id,
+            "rules": [
+                {
+                    "type": "ALL",
+                    "conditions": [],
+                    "rules": [
+                        {
+                            "type": match_type.upper() if match_type.upper() in {"ALL", "ANY"} else "ALL",
+                            "conditions": conditions,
+                            "rules": [],
+                        }
+                    ],
+                }
+            ],
+        }
+        segments = await self.list_segments(project_id)
+        existing = next((s for s in segments if s.get("name") == segment_name), None)
+        if existing is not None:
+            seg_id = int(existing["id"])
+            resp = await self._mgmt("PUT", f"/projects/{project_id}/segments/{seg_id}/", json_body=payload)
+            return dict(resp.json())
+        resp = await self._mgmt("POST", f"/projects/{project_id}/segments/", json_body=payload)
+        return dict(resp.json())
+
+    async def apply_segment_override(
+        self,
+        *,
+        project_id: int,
+        env_key: str,
+        feature_id: int,
+        segment_id: int,
+        enabled: bool,
+        feature_state_value: Any = None,
+        priority: int = 0,
+    ) -> dict[str, Any]:
+        """Enable or update a targeting segment override on a feature in an environment."""
+        override: dict[str, Any] = {
+            "segment_id": segment_id,
+            "enabled": enabled,
+            "priority": priority,
+            "create_if_missing": True,
+        }
+        if feature_state_value is not None:
+            override["feature_state_value"] = feature_state_value
+        return await self.apply_feature_state_mutation(
+            env_key,
+            feature_id,
+            segment_override=override,
+        )
+
+    async def update_flag_metadata(
+        self,
+        project_id: int,
+        feature_id: int,
+        *,
+        description: str | None = None,
+        is_archived: bool | None = None,
+    ) -> dict[str, Any]:
+        """Update non-environment feature metadata such as description or archive state."""
+        body: dict[str, Any] = {}
+        if description is not None:
+            body["description"] = description
+        if is_archived is not None:
+            body["is_archived"] = is_archived
+        resp = await self._mgmt(
+            "PATCH", f"/projects/{project_id}/features/{feature_id}/", json_body=body
+        )
+        return dict(resp.json())
 
     # ------------------------------------------------------------------
     # Experiment Capability Probe

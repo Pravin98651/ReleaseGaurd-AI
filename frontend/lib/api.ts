@@ -1205,6 +1205,56 @@ export async function promoteExperimentWinner(
   return normalizeMutation<Experiment>(status, data);
 }
 
+export async function getFlagsmithCommandCenter(): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(
+    "/api/v1/flagsmith/command-center"
+  );
+  return data;
+}
+
+export async function provisionFlagsmithCatalog(body?: {
+  keys?: string[];
+  include_targeting_segments?: boolean;
+}): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(
+    "/api/v1/flagsmith/catalog/provision",
+    {
+      method: "POST",
+      body: JSON.stringify(body ?? { include_targeting_segments: true }),
+    }
+  );
+  return data;
+}
+
+export async function explainFlagsmithIdentity(body: {
+  environment_name: string;
+  identifier: string;
+  traits: Record<string, unknown>;
+}): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(
+    "/api/v1/flagsmith/identities/explain",
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    }
+  );
+  return data;
+}
+
+export async function runFlagsmithTestHarness(
+  expId: string,
+  body?: { identities_per_arm?: number }
+): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(
+    `/api/v1/flagsmith/experiments/${expId}/run-test-harness`,
+    {
+      method: "POST",
+      body: JSON.stringify(body ?? { identities_per_arm: 25 }),
+    }
+  );
+  return data;
+}
+
 export async function getExperimentAnalysis(expId: string): Promise<ExperimentAnalysis> {
   const { data } = await requestJson<ExperimentAnalysis>(`/api/v1/experiments/${expId}/analysis`);
   return data;

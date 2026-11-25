@@ -520,6 +520,8 @@ async def test_flagsmith_native_experiments_metrics_and_winner_promotion() -> No
             if method == "GET":
                 return httpx.Response(200, json={"results": metrics_store})
             if method == "POST":
+                assert body["definition"]["version"] == 1
+                assert "event" in body["definition"]
                 item = {"id": len(metrics_store) + 1, **body}
                 metrics_store.append(item)
                 return httpx.Response(201, json=item)

@@ -1,0 +1,7 @@
+# Flagsmith Integration Architecture (Phase 3)
+
+## 1. Central Governance Layer (`FlagsmithGovernanceService` + `FlagsmithClient`)
+- **Single Management Client:** All Flagsmith Management (`api.flagsmith.com/api/v1`) and Edge (`edge.api.flagsmith.com/api/v1`) REST calls flow exclusively through `backend/app/integrations/flagsmith_client.py` (using `Authorization: Token <FLAGSMITH_ORG_TOKEN>` for Management API and `X-Environment-Key` for Edge API). Credentials never leave the backend.
+- **v1 & v2 Feature Versioning Dual Adapter:** Automatically detects `use_v2_feature_versioning` per environment, creates draft versions, mutates states/segment overrides, publishes versions (`live_from`), and reads back state via `verify_live_state()`.
+- **Native Experimentation & Metrics:** Implements Flagsmith's verified `/environments/{env_key}/experiment-metrics/` and `/environments/{env_key}/experiments/` (`/start/`, `/stop/`, `/results/refresh/`, `/results/`) endpoints with schema-compliant payloads.
+- **CLI Integration (`@flagsmith/cli v2.0.0`):** `npx @flagsmith/cli evaluate -e <env_key> --sdk-api-url https://edge.api.flagsmith.com --json` is verified end-to-end against Project `#56055` `Development`. *(Admin CLI `feature`/`project` commands require a Flagsmith Master API Key `FLAGSMITH_API_KEY`; when `FLAGSMITH_ORG_TOKEN` is used, `FlagsmithGovernanceService` routes admin mutations through `FlagsmithClient` with PolicyEngine + Approval governance.)*

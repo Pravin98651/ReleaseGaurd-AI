@@ -26,6 +26,11 @@ ALLOWED_EVENT_TYPES = frozenset(
         "checkout_completed",
         "checkout_abandoned",
         "payment_failed",
+        "payment_completed",
+        "product_clicked_from_recommendation",
+        "add_to_cart_from_recommendation",
+        "search_result_clicked",
+        "product_added_after_search",
     }
 )
 

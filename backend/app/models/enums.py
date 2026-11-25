@@ -133,6 +133,11 @@ class ExperimentEventType(StrEnum):
     CHECKOUT_COMPLETED = "checkout_completed"
     CHECKOUT_ABANDONED = "checkout_abandoned"
     PAYMENT_FAILED = "payment_failed"
+    PAYMENT_COMPLETED = "payment_completed"
+    PRODUCT_CLICKED_FROM_RECOMMENDATION = "product_clicked_from_recommendation"
+    ADD_TO_CART_FROM_RECOMMENDATION = "add_to_cart_from_recommendation"
+    SEARCH_RESULT_CLICKED = "search_result_clicked"
+    PRODUCT_ADDED_AFTER_SEARCH = "product_added_after_search"
 
 
 class ApprovalCategory(StrEnum):

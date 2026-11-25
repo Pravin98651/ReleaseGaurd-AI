@@ -11,6 +11,7 @@ from app.api.v1.dx_integration import dx_router
 from app.api.v1.events import events_router
 from app.api.v1.experiments import experiments_router
 from app.api.v1.flags import flag_health_router, flags_router
+from app.api.v1.flagsmith_hub import flagsmith_hub_router
 from app.api.v1.intelligence import intelligence_router
 from app.api.v1.metrics import metrics_router
 from app.api.v1.notifications import notifications_router
@@ -41,6 +42,7 @@ api_v1_router.include_router(agent_router)
 api_v1_router.include_router(agent_executions_router)
 api_v1_router.include_router(flags_router)
 api_v1_router.include_router(flag_health_router)
+api_v1_router.include_router(flagsmith_hub_router)
 api_v1_router.include_router(releases_router)
 api_v1_router.include_router(rollouts_router)
 api_v1_router.include_router(intelligence_router)

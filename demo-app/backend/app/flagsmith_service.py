@@ -157,6 +157,63 @@ class FlagsmithService:
                 error=str(exc),
             )
 
+    async def evaluate_named_flag(
+        self,
+        *,
+        user_id: str,
+        flag_key: str,
+        default_enabled: bool = False,
+        safe_default_value: Any = "control",
+        traits: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Evaluate any catalog flag cleanly with explicit per-flag safe fallback."""
+        if not self.is_configured or self._client is None:
+            return {
+                "flag_key": flag_key,
+                "enabled": default_enabled,
+                "value": safe_default_value,
+                "variation_key": str(safe_default_value),
+                "flagsmith_connected": False,
+                "evaluation_source": "fallback_default",
+            }
+        try:
+            flags = await asyncio.to_thread(
+                self._client.get_identity_flags,
+                identifier=user_id,
+                traits=traits or {},
+            )
+            flag = flags.get_flag(flag_key)
+            enabled = bool(getattr(flag, "enabled", default_enabled))
+            val = getattr(flag, "value", None)
+            effective_val = val if val is not None else safe_default_value
+            self._last_call_failed = False
+            return {
+                "flag_key": flag_key,
+                "enabled": enabled,
+                "value": effective_val,
+                "variation_key": str(effective_val),
+                "flagsmith_connected": True,
+                "evaluation_source": "flagsmith_sdk",
+            }
+        except (
+            FlagsmithClientError,
+            requests.RequestException,
+            OSError,
+            RuntimeError,
+            ValueError,
+            TypeError,
+        ) as exc:
+            logger.debug("Named flag evaluation fallback for %s/%s: %s", flag_key, user_id, exc)
+            return {
+                "flag_key": flag_key,
+                "enabled": default_enabled,
+                "value": safe_default_value,
+                "variation_key": str(safe_default_value),
+                "flagsmith_connected": False,
+                "evaluation_source": "fallback_default",
+                "error": str(exc),
+            }
+
     async def track_exposure(
         self,
         *,
