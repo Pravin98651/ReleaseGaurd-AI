@@ -1093,6 +1093,181 @@ class FlagsmithClient:
         )
 
     # ------------------------------------------------------------------
+    # Native Flagsmith Experimentation & Metrics APIs
+    # ------------------------------------------------------------------
+
+    async def list_experiment_metrics(self, env_key: str) -> list[dict[str, Any]]:
+        """List experiment metrics configured for a Flagsmith environment."""
+        resp = await self._mgmt("GET", f"/environments/{env_key}/experiment-metrics/")
+        return _extract_items(resp.json())
+
+    async def create_experiment_metric(
+        self,
+        env_key: str,
+        *,
+        name: str,
+        event_name: str,
+        aggregation: str = "occurrence",
+        direction: str = "up",
+        description: str = "",
+    ) -> dict[str, Any]:
+        """Create an experiment metric in Flagsmith for a tracked event_name."""
+        existing = await self.list_experiment_metrics(env_key)
+        for item in existing:
+            defn = item.get("definition") or {}
+            if item.get("name") == name or defn.get("event_name") == event_name:
+                return item
+        resp = await self._mgmt(
+            "POST",
+            f"/environments/{env_key}/experiment-metrics/",
+            json_body={
+                "name": name,
+                "description": description or f"Metric for {event_name}",
+                "aggregation": aggregation,
+                "direction": direction,
+                "definition": {"event_name": event_name},
+            },
+        )
+        return dict(resp.json())
+
+    async def list_experiments(self, env_key: str) -> list[dict[str, Any]]:
+        """List native Flagsmith experiments in an environment."""
+        resp = await self._mgmt("GET", f"/environments/{env_key}/experiments/")
+        return _extract_items(resp.json())
+
+    async def get_experiment(self, env_key: str, experiment_id: int | str) -> dict[str, Any]:
+        """Retrieve a single native Flagsmith experiment."""
+        resp = await self._mgmt("GET", f"/environments/{env_key}/experiments/{experiment_id}/")
+        return dict(resp.json())
+
+    async def create_experiment(
+        self,
+        env_key: str,
+        *,
+        feature_id: int,
+        name: str,
+        hypothesis: str,
+        metrics: list[dict[str, Any]] | None = None,
+        experiment_rollout: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Create a native Flagsmith experiment linked to a multivariate feature flag."""
+        payload: dict[str, Any] = {
+            "feature": feature_id,
+            "name": name[:255],
+            "hypothesis": hypothesis,
+        }
+        if metrics:
+            payload["metrics"] = metrics
+        if experiment_rollout is not None:
+            payload["experiment_rollout"] = experiment_rollout
+        resp = await self._mgmt(
+            "POST",
+            f"/environments/{env_key}/experiments/",
+            json_body=payload,
+        )
+        return dict(resp.json())
+
+    async def start_experiment(self, env_key: str, experiment_id: int | str) -> dict[str, Any]:
+        """Start a native Flagsmith experiment."""
+        resp = await self._mgmt(
+            "POST", f"/environments/{env_key}/experiments/{experiment_id}/start/"
+        )
+        return dict(resp.json()) if resp.content else {"status": "running"}
+
+    async def stop_experiment(self, env_key: str, experiment_id: int | str) -> dict[str, Any]:
+        """Stop/conclude a native Flagsmith experiment."""
+        resp = await self._mgmt(
+            "POST", f"/environments/{env_key}/experiments/{experiment_id}/stop/"
+        )
+        return dict(resp.json()) if resp.content else {"status": "completed"}
+
+    async def refresh_experiment_results(
+        self, env_key: str, experiment_id: int | str
+    ) -> dict[str, Any]:
+        """Trigger Flagsmith experiment warehouse results refresh (may be rate-limited)."""
+        resp = await self._mgmt(
+            "POST",
+            f"/environments/{env_key}/experiments/{experiment_id}/results/refresh/",
+            allow_statuses={200, 202, 429},
+        )
+        try:
+            payload = resp.json() if resp.content else {}
+        except ValueError:
+            payload = {"raw": resp.text}
+        return {"status_code": resp.status_code, "data": payload}
+
+    async def get_experiment_results(
+        self, env_key: str, experiment_id: int | str
+    ) -> dict[str, Any]:
+        """Retrieve real Bayesian results from Flagsmith native experimentation."""
+        resp = await self._mgmt(
+            "GET",
+            f"/environments/{env_key}/experiments/{experiment_id}/results/",
+            allow_statuses={200, 404},
+        )
+        if resp.status_code == 404:
+            return {"available": False, "status_code": 404, "results": None}
+        payload = resp.json() if resp.content else {}
+        return {"available": True, "status_code": 200, "results": payload}
+
+    async def promote_experiment_winner(
+        self,
+        *,
+        project_id: int,
+        env_key: str,
+        feature_id: int,
+        flag_key: str,
+        winning_variation: str,
+        verify_edge: bool = False,
+    ) -> dict[str, Any]:
+        """Promote winning experiment variant to 100% on the same Flagsmith flag and verify."""
+        options = await self.list_mv_options(project_id, feature_id)
+        if options:
+            allocations: dict[str, int] = {}
+            matched = False
+            for opt in options:
+                val = str(opt.get("string_value") or opt.get("value") or "")
+                if val == winning_variation:
+                    allocations[val] = 100
+                    matched = True
+                else:
+                    allocations[val] = 0
+            if not matched:
+                allocations[winning_variation] = 100
+            return await self.configure_multivariate_split(
+                project_id=project_id,
+                env_key=env_key,
+                feature_id=feature_id,
+                flag_key=flag_key,
+                allocations=allocations,
+                verify_edge=verify_edge,
+            )
+
+        target_enabled = winning_variation.strip().lower() not in {"control", "v1", "false", "off", "0"}
+        segments = await self.list_segments(project_id)
+        rollout_seg = next((s for s in segments if s.get("name") == f"rg_rollout_{flag_key}"), None)
+        seg_override = (
+            {"segment_id": int(rollout_seg["id"]), "enabled": False, "create_if_missing": False}
+            if rollout_seg is not None
+            else None
+        )
+        mutation = await self.apply_feature_state_mutation(
+            env_key,
+            feature_id,
+            base_updates={"enabled": target_enabled, "feature_state_value": winning_variation},
+            segment_override=seg_override,
+        )
+        verification = await self.verify_live_state(
+            env_key=env_key,
+            feature_id=feature_id,
+            flag_key=flag_key,
+            project_id=project_id,
+            expected_enabled=target_enabled,
+            verify_edge=verify_edge,
+        )
+        return {"mutation": mutation, "verification": verification}
+
+    # ------------------------------------------------------------------
     # Experiment Capability Probe
     # ------------------------------------------------------------------
 

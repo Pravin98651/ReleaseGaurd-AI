@@ -15,4 +15,5 @@ cryptography
 python-multipart
 tzdata
 pytest
+pytest-asyncio
 ruff

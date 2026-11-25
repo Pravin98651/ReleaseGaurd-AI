@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import httpx
 import pytest
@@ -502,3 +503,90 @@ async def test_flagsmith_cloud_v2_numeric_env_id_segments_and_version_readback()
     assert res["verification"]["matches"] is True
     assert res["verification"]["actual_state"]["rollout_percentage"] == 25
     assert res["verification"]["actual_state"]["states_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_flagsmith_native_experiments_metrics_and_winner_promotion() -> None:
+    metrics_store: list[dict[str, Any]] = []
+    experiments_store: list[dict[str, Any]] = []
+    backend = _MockFlagsmithBackend(v2_enabled=False)
+
+    def exp_handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        method = request.method.upper()
+        body = json.loads(request.content.decode()) if request.content else {}
+
+        if path == "/api/v1/environments/env_key_prod/experiment-metrics/":
+            if method == "GET":
+                return httpx.Response(200, json={"results": metrics_store})
+            if method == "POST":
+                item = {"id": len(metrics_store) + 1, **body}
+                metrics_store.append(item)
+                return httpx.Response(201, json=item)
+
+        if path == "/api/v1/environments/env_key_prod/experiments/":
+            if method == "GET":
+                return httpx.Response(200, json={"results": experiments_store})
+            if method == "POST":
+                item = {"id": 900 + len(experiments_store), "status": "created", **body}
+                experiments_store.append(item)
+                return httpx.Response(201, json=item)
+
+        if path == "/api/v1/environments/env_key_prod/experiments/900/start/" and method == "POST":
+            experiments_store[0]["status"] = "running"
+            return httpx.Response(200, json=experiments_store[0])
+
+        if path == "/api/v1/environments/env_key_prod/experiments/900/results/refresh/" and method == "POST":
+            return httpx.Response(200, json={"refreshed": True})
+
+        if path == "/api/v1/environments/env_key_prod/experiments/900/results/" and method == "GET":
+            return httpx.Response(200, json={"winner": "treatment", "win_probability": 0.96})
+
+        if path == "/api/v1/environments/env_key_prod/experiments/900/stop/" and method == "POST":
+            experiments_store[0]["status"] = "completed"
+            return httpx.Response(200, json=experiments_store[0])
+
+        return backend.handler(request)
+
+    client = FlagsmithClient(
+        org_token="org_secret_token",
+        transport=httpx.MockTransport(exp_handler),
+        retry_delay_base=0.0,
+    )
+    metric = await client.create_experiment_metric(
+        "env_key_prod",
+        name="checkout_completed",
+        event_name="checkout_completed",
+    )
+    assert metric["id"] == 1
+
+    exp = await client.create_experiment(
+        "env_key_prod",
+        feature_id=100,
+        name="Checkout V2 Experiment",
+        hypothesis="Express checkout lifts completion rate.",
+        metrics=[{"metric": metric["id"], "expected_direction": "increase"}],
+    )
+    assert exp["id"] == 900
+
+    started = await client.start_experiment("env_key_prod", 900)
+    assert started["status"] == "running"
+
+    refreshed = await client.refresh_experiment_results("env_key_prod", 900)
+    assert refreshed["status_code"] == 200
+    results = await client.get_experiment_results("env_key_prod", 900)
+    assert results["available"] is True
+    assert results["results"]["win_probability"] == 0.96
+
+    stopped = await client.stop_experiment("env_key_prod", 900)
+    assert stopped["status"] == "completed"
+
+    promo = await client.promote_experiment_winner(
+        project_id=10,
+        env_key="env_key_prod",
+        feature_id=100,
+        flag_key="checkout_v2",
+        winning_variation="v2",
+    )
+    assert promo["verification"]["matches"] is True
+    assert promo["verification"]["actual_state"]["mv_allocations"]["v2"] == 100

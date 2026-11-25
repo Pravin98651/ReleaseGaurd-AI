@@ -455,3 +455,106 @@ async def get_experiment_recommendation(
     ).model_dump(mode="json")
     resp["rationale"] = rec.rationale
     return resp
+
+
+@experiments_router.post("/{exp_id}/refresh-flagsmith-results")
+async def refresh_flagsmith_experiment_results(
+    exp_id: uuid.UUID,
+    request: Request,
+    session: DBSession,
+    _: AuthenticatedOperator,
+) -> dict[str, Any]:
+    """Trigger Flagsmith native experiment results refresh and read back latest results."""
+    exp = await session.get(Experiment, exp_id)
+    if exp is None:
+        raise APIException(404, "EXPERIMENT_NOT_FOUND", f"Experiment {exp_id} not found.")
+    if not exp.flagsmith_experiment_id or not exp.environment_key:
+        return {
+            "experiment_id": str(exp.id),
+            "flagsmith_experiment_id": exp.flagsmith_experiment_id,
+            "available": False,
+            "reason": "Experiment is not linked to a Flagsmith native experiment ID.",
+        }
+    ctx = await build_tool_context(request.app, session)
+    client = await ctx.get_flagsmith_client()
+    refresh_resp = await client.refresh_experiment_results(
+        exp.environment_key, exp.flagsmith_experiment_id
+    )
+    results_resp = await client.get_experiment_results(
+        exp.environment_key, exp.flagsmith_experiment_id
+    )
+    return {
+        "experiment_id": str(exp.id),
+        "flagsmith_experiment_id": exp.flagsmith_experiment_id,
+        "refresh": refresh_resp,
+        **results_resp,
+    }
+
+
+@experiments_router.post("/{exp_id}/promote-winner")
+async def promote_experiment_winner(
+    exp_id: uuid.UUID,
+    request: Request,
+    session: DBSession,
+    operator: DefaultOperator,
+    winning_variation: Annotated[str | None, Query(max_length=64)] = None,
+) -> Any:
+    """Request explicit human approval to promote the winning experiment variant on Flagsmith."""
+    exp = await session.get(Experiment, exp_id)
+    if exp is None:
+        raise APIException(404, "EXPERIMENT_NOT_FOUND", f"Experiment {exp_id} not found.")
+    flag = await session.get(FeatureFlag, exp.feature_flag_id)
+    if flag is None:
+        raise APIException(404, "FEATURE_FLAG_NOT_FOUND", "Underlying feature flag not found.")
+
+    winner = (winning_variation or "").strip() or (
+        exp.control_variation
+        if exp.latest_recommendation == ReleaseRecommendation.RECOMMEND_ROLLBACK
+        else exp.treatment_variation
+    )
+    ctx = await build_tool_context(request.app, session, user_id=operator.id)
+    action_payload = {
+        "experiment_id": str(exp.id),
+        "winning_variation": winner,
+        "flag_key": flag.key,
+    }
+    res_type, res_id, expected_pre, env_states = await capture_expected_precondition(
+        ctx, action_type="promote_experiment_winner", action_payload=action_payload
+    )
+    approval = await PolicyEngine.create_approval(
+        session,
+        action_type="promote_experiment_winner",
+        target_resource_type=res_type,
+        target_resource_id=res_id,
+        environment_name=exp.environment_name,
+        title=f"Promote winning variant '{winner}' for '{flag.key}' in {exp.environment_name}",
+        rationale=(
+            f"Human approval required before promoting '{winner}' to 100% on Flagsmith "
+            f"flag '{flag.key}' ({exp.name})."
+        ),
+        action_payload=action_payload,
+        expected_precondition=expected_pre,
+        env_states=env_states,
+        requested_by_id=operator.id,
+    )
+    await PolicyEngine.record_audit_log(
+        session,
+        actor_type=ActorType.USER,
+        actor_id=str(operator.id),
+        policy_category=PolicyCategory.C,
+        event_action="experiment.winner_promotion_requested",
+        resource_type="experiment",
+        resource_id=str(exp.id),
+        environment_name=exp.environment_name,
+        status=AuditStatus.SUCCESS,
+        details={"winning_variation": winner, "flag_key": flag.key, "approval_id": str(approval.id)},
+    )
+    await session.commit()
+    await session.refresh(approval)
+    return JSONResponse(
+        status_code=202,
+        content={
+            "execution_status": "approval_required",
+            "approval": ApprovalOut.model_validate(approval).model_dump(mode="json"),
+        },
+    )

@@ -156,3 +156,52 @@ class FlagsmithService:
                 evaluation_source="fallback_default",
                 error=str(exc),
             )
+
+    async def track_exposure(
+        self,
+        *,
+        user_id: str,
+        flag_key: str,
+        variation: str,
+    ) -> bool:
+        """Emit an exposure event to Flagsmith SDK when supported (safe no-op offline)."""
+        if not self.is_configured or self._client is None:
+            return False
+        fn = getattr(self._client, "track_exposure_event", None)
+        if not callable(fn):
+            return False
+        try:
+            await asyncio.to_thread(fn, identifier=user_id, feature_name=flag_key, value=variation)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Flagsmith track_exposure_event skipped: %s", exc)
+            return False
+
+    async def track_conversion(
+        self,
+        *,
+        user_id: str,
+        event_name: str,
+        value: float | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> bool:
+        """Emit a conversion/metric event to Flagsmith SDK and flush when supported."""
+        if not self.is_configured or self._client is None:
+            return False
+        fn = getattr(self._client, "track_event", None)
+        if not callable(fn):
+            return False
+        try:
+            kwargs: dict[str, Any] = {"identifier": user_id, "event_name": event_name}
+            if value is not None:
+                kwargs["value"] = value
+            if metadata:
+                kwargs["metadata"] = metadata
+            await asyncio.to_thread(fn, **kwargs)
+            flush_fn = getattr(self._client, "flush_events", None)
+            if callable(flush_fn):
+                await asyncio.to_thread(flush_fn)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Flagsmith track_event skipped: %s", exc)
+            return False

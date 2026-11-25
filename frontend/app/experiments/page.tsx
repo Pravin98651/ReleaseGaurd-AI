@@ -22,6 +22,7 @@ import {
   listExperiments,
   listFeatureFlags,
   planExperiment,
+  promoteExperimentWinner,
   stopExperiment,
 } from "@/lib/api";
 import type {
@@ -169,6 +170,29 @@ function ExperimentsInner() {
         setQueuedApproval(outcome.approval);
       } else {
         setNotice(`Activated experiment '${exp.name}' in ${exp.environment_name}.`);
+        await loadAll();
+      }
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handlePromoteWinner = async (exp: Experiment) => {
+    setBusyAction("promote");
+    setError(null);
+    setNotice(null);
+    setQueuedApproval(null);
+    try {
+      const outcome = await promoteExperimentWinner(exp.id, exp.treatment_variation);
+      if (outcome.execution_status === "approval_required" && outcome.approval) {
+        setQueuedApproval(outcome.approval);
+        setNotice(
+          `Approval requested to promote '${exp.treatment_variation}' on Flagsmith.`
+        );
+      } else {
+        setNotice(`Promoted winning variant for '${exp.name}'.`);
         await loadAll();
       }
     } catch (err) {
@@ -412,11 +436,26 @@ function ExperimentsInner() {
                         {busyAction === "stop" ? "Stopping..." : "Stop Experiment"}
                       </button>
                     )}
+                    <button
+                      type="button"
+                      disabled={busyAction !== null}
+                      onClick={() => void handlePromoteWinner(selectedExp)}
+                      className="inline-flex items-center gap-1 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-400 disabled:opacity-50"
+                    >
+                      {busyAction === "promote"
+                        ? "Requesting Approval..."
+                        : "Promote Winner (Requires Approval)"}
+                    </button>
                   </div>
                 }
               >
                 <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
                   <EnvironmentBadge environment={selectedExp.environment_name} />
+                  {selectedExp.flagsmith_experiment_id && (
+                    <span className="rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] text-emerald-300">
+                      Flagsmith Exp #{selectedExp.flagsmith_experiment_id}
+                    </span>
+                  )}
                   <span className="font-mono">
                     Control: {selectedExp.control_variation} (
                     {selectedExp.traffic_allocation?.[selectedExp.control_variation] ?? 50}

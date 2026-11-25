@@ -1152,6 +1152,22 @@ export async function stopExperiment(
   return normalizeMutation<Experiment>(status, data);
 }
 
+export async function promoteExperimentWinner(
+  expId: string,
+  winningVariation?: string
+): Promise<MutationOutcome<Experiment>> {
+  const qs = winningVariation
+    ? `?winning_variation=${encodeURIComponent(winningVariation)}`
+    : "";
+  const { status, data } = await requestJson<unknown>(
+    `/api/v1/experiments/${expId}/promote-winner${qs}`,
+    {
+      method: "POST",
+    }
+  );
+  return normalizeMutation<Experiment>(status, data);
+}
+
 export async function getExperimentAnalysis(expId: string): Promise<ExperimentAnalysis> {
   const { data } = await requestJson<ExperimentAnalysis>(`/api/v1/experiments/${expId}/analysis`);
   return data;

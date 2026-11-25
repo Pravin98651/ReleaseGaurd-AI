@@ -8,6 +8,7 @@ from typing import Any
 from app.agents.tools.context import ToolExecutionContext, _extract_pct_from_seg
 from app.agents.tools.experiment_tools import (
     handle_activate_experiment,
+    handle_promote_experiment_winner,
     handle_stop_or_conclude_experiment,
 )
 from app.agents.tools.flag_tools import (
@@ -194,7 +195,14 @@ async def capture_expected_precondition(
             dict(flag.env_states or {}),
         )
 
-    if norm in ("experiment_activate", "activate_experiment", "experiment_stop", "stop_or_conclude_experiment"):
+    if norm in (
+        "experiment_activate",
+        "activate_experiment",
+        "experiment_stop",
+        "stop_or_conclude_experiment",
+        "promote_experiment_winner",
+        "experiment_promote_winner",
+    ):
         exp_id = uuid.UUID(str(action_payload["experiment_id"]))
         exp = await ctx.session.get(Experiment, exp_id)
         if exp is None:
@@ -343,7 +351,14 @@ async def _run_revalidation(
     ):
         return await _revalidate_flag_state(ctx, approval)
 
-    if norm in ("experiment_activate", "activate_experiment", "experiment_stop", "stop_or_conclude_experiment"):
+    if norm in (
+        "experiment_activate",
+        "activate_experiment",
+        "experiment_stop",
+        "stop_or_conclude_experiment",
+        "promote_experiment_winner",
+        "experiment_promote_winner",
+    ):
         exp = await ctx.session.get(
             Experiment, uuid.UUID(str(approval.action_payload["experiment_id"]))
         )
@@ -429,6 +444,13 @@ async def _run_execution(
     if norm in ("experiment_stop", "stop_or_conclude_experiment"):
         args = StopOrConcludeExperimentInput.model_validate(payload)
         return await handle_stop_or_conclude_experiment(ctx, args)
+
+    if norm in ("promote_experiment_winner", "experiment_promote_winner"):
+        return await handle_promote_experiment_winner(
+            ctx,
+            payload["experiment_id"],
+            payload.get("winning_variation"),
+        )
 
     if norm == "release_rollout_approve":
         return {

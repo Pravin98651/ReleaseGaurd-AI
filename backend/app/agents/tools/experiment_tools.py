@@ -14,6 +14,7 @@ from app.analytics.incidents import investigate_incident
 from app.analytics.recommendations import evaluate_recommendation
 from app.core.config import get_settings
 from app.core.database import utcnow
+from app.integrations.flagsmith_client import FlagsmithAPIError
 from app.models import (
     AnalyticsMode,
     AuditLog,
@@ -193,6 +194,70 @@ async def handle_activate_experiment(
             exp.environment_key = env_key
             if flag.flagsmith_feature_id is not None:
                 alloc = dict(exp.traffic_allocation or {"control": 50, "treatment": 50})
+                if (
+                    exp.analytics_mode == AnalyticsMode.FLAGSMITH_NATIVE
+                    and exp.flagsmith_experiment_id is None
+                ):
+                    try:
+                        metric = await client.create_experiment_metric(
+                            env_key,
+                            name=exp.primary_metric,
+                            event_name=exp.primary_metric,
+                            aggregation="occurrence",
+                            direction="up",
+                            description=f"Primary metric for {exp.name}",
+                        )
+                        if flag.flag_type == FlagType.MULTIVARIATE:
+                            opts = await client.list_mv_options(
+                                flag.flagsmith_project_id, int(flag.flagsmith_feature_id)
+                            )
+                            opt_map = {
+                                str(o.get("string_value") or o.get("value") or ""): int(o["id"])
+                                for o in opts
+                            }
+                            mv_rollout = []
+                            for var_key, pct in alloc.items():
+                                if var_key not in opt_map:
+                                    created_opt = await client.create_mv_option(
+                                        flag.flagsmith_project_id,
+                                        int(flag.flagsmith_feature_id),
+                                        value=var_key,
+                                        default_percentage_allocation=int(pct),
+                                    )
+                                    opt_map[var_key] = int(created_opt["id"])
+                                mv_rollout.append(
+                                    {
+                                        "multivariate_feature_option": opt_map[var_key],
+                                        "percentage_allocation": float(pct),
+                                    }
+                                )
+                            native_exp = await client.create_experiment(
+                                env_key,
+                                feature_id=int(flag.flagsmith_feature_id),
+                                name=exp.name,
+                                hypothesis=exp.hypothesis,
+                                metrics=[
+                                    {
+                                        "metric": int(metric["id"]),
+                                        "expected_direction": "increase",
+                                    }
+                                ],
+                                experiment_rollout={
+                                    "enabled": True,
+                                    "rollout_percentage": 100.0,
+                                    "feature_state_value": {
+                                        "type": "string",
+                                        "value": exp.control_variation,
+                                    },
+                                    "multivariate_feature_state_values": mv_rollout,
+                                },
+                            )
+                            if native_exp.get("id") is not None:
+                                exp.flagsmith_experiment_id = str(native_exp["id"])
+                                await client.start_experiment(env_key, exp.flagsmith_experiment_id)
+                    except (FlagsmithAPIError, KeyError, TypeError, ValueError):
+                        pass
+
                 if flag.flag_type == FlagType.MULTIVARIATE:
                     await client.configure_multivariate_split(
                         project_id=flag.flagsmith_project_id,
@@ -339,6 +404,16 @@ async def handle_compute_bayesian_experiment_analysis(
         thresholds=merged_thresholds,
     )
     analysis_dict = result.model_dump(mode="json")
+    if exp.flagsmith_experiment_id and exp.environment_key:
+        try:
+            client = await ctx.get_flagsmith_client()
+            native_res = await client.get_experiment_results(
+                exp.environment_key, exp.flagsmith_experiment_id
+            )
+            analysis_dict["flagsmith_native_results"] = native_res
+            analysis_dict["flagsmith_experiment_id"] = exp.flagsmith_experiment_id
+        except (FlagsmithAPIError, ValueError):
+            analysis_dict["flagsmith_native_results"] = {"available": False}
     exp.latest_bayesian_result = analysis_dict
     await ctx.session.commit()
     await ctx.session.refresh(exp)
@@ -601,6 +676,69 @@ async def handle_propose_release_action(
         action_hash=approval.action_hash,
         status=approval.status.value,
     ).model_dump(mode="json")
+
+
+async def handle_promote_experiment_winner(
+    ctx: ToolExecutionContext,
+    experiment_id: Any,
+    winning_variation: str | None = None,
+) -> dict[str, Any]:
+    """Promote an approved winning experiment variant on the same Flagsmith flag and verify."""
+    import uuid as _uuid
+
+    exp_uuid = experiment_id if isinstance(experiment_id, _uuid.UUID) else _uuid.UUID(str(experiment_id))
+    exp = await ctx.session.get(Experiment, exp_uuid)
+    if exp is None:
+        raise ValueError(f"Experiment {exp_uuid} not found.")
+    flag = await ctx.session.get(FeatureFlag, exp.feature_flag_id)
+    if flag is None or flag.flagsmith_feature_id is None:
+        raise ValueError("Experiment feature flag is not linked to Flagsmith.")
+
+    winner = (winning_variation or "").strip() or (
+        exp.control_variation
+        if exp.latest_recommendation == ReleaseRecommendation.RECOMMEND_ROLLBACK
+        else exp.treatment_variation
+    )
+    client = await ctx.get_flagsmith_client()
+    env_key = exp.environment_key or await ctx.resolve_env_key(
+        exp.environment_name, flag=flag, project_id=flag.flagsmith_project_id
+    )
+    promo = await client.promote_experiment_winner(
+        project_id=flag.flagsmith_project_id,
+        env_key=env_key,
+        feature_id=int(flag.flagsmith_feature_id),
+        flag_key=flag.key,
+        winning_variation=winner,
+        verify_edge=ctx.verify_edge_on_mutation,
+    )
+    verification = dict(promo.get("verification") or {})
+    verified = bool(verification.get("matches", False))
+    if not verified:
+        raise RuntimeError(
+            f"Post-mutation Flagsmith verification failed: {verification.get('mismatches')}"
+        )
+
+    if exp.flagsmith_experiment_id:
+        try:
+            await client.stop_experiment(env_key, exp.flagsmith_experiment_id)
+        except FlagsmithAPIError:
+            pass
+
+    await ctx.sync_flag_from_flagsmith(flag.key, project_id=flag.flagsmith_project_id)
+    exp.status = ExperimentStatus.COMPLETED
+    exp.ended_at = utcnow()
+    await ctx.session.commit()
+    await ctx.session.refresh(exp)
+
+    return {
+        "experiment_id": str(exp.id),
+        "flag_key": flag.key,
+        "environment_name": exp.environment_name,
+        "winning_variation": winner,
+        "verified": verified,
+        "verification": verification,
+        "status": exp.status.value,
+    }
 
 
 EXPERIMENT_TOOL_HANDLERS: dict[str, Any] = {

@@ -23,9 +23,12 @@ export function SimulatorBar({
             <h2 className="text-sm font-semibold text-white">
               Traffic &amp; Experiment Simulator
             </h2>
+            <span className="rounded border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">
+              Simulated Test Traffic
+            </span>
           </div>
           <p className="mt-0.5 text-xs text-slate-400">
-            Generate deterministic shopper cohorts through Flagsmith evaluation and push real batches to ReleaseGuard AI.
+            Generate deterministic simulated shopper cohorts through Flagsmith SDK evaluation and push real batches to ReleaseGuard AI.
           </p>
         </div>
 

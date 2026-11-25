@@ -121,6 +121,12 @@ def create_app(
             },
         )
         await telem.emit_events([event])
+        if eval_res.evaluation_source == "flagsmith_sdk":
+            await fs.track_exposure(
+                user_id=user_id,
+                flag_key=eval_res.flag_key,
+                variation=eval_res.variation_key,
+            )
 
         return FlagEvaluationResponse(
             user_id=user_id,
@@ -145,13 +151,26 @@ def create_app(
         app_cfg: ConfigDep,
     ) -> CheckoutResponse:
         eval_res = await fs.evaluate_checkout_flag(user_id=req.user_id, traits=req.traits)
-        return await process_checkout(
+        res = await process_checkout(
             req=req,
             flag_eval=eval_res,
             telemetry=telem,
             salt=app_cfg.PSEUDONYM_SALT,
             default_environment=app_cfg.FLAGSMITH_ENVIRONMENT_NAME,
         )
+        if eval_res.evaluation_source == "flagsmith_sdk":
+            event_name = (
+                "checkout_completed"
+                if res.status == "completed"
+                else ("checkout_abandoned" if res.status == "abandoned" else "payment_failed")
+            )
+            await fs.track_conversion(
+                user_id=req.user_id,
+                event_name=event_name,
+                value=req.cart_total if res.status == "completed" else None,
+                metadata={"checkout_version": res.checkout_version},
+            )
+        return res
 
     @app.post("/api/simulate", response_model=SimulateResponse)
     async def simulate(
