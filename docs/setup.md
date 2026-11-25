@@ -39,8 +39,11 @@ Paste `SECRET_KEY` and `ENCRYPTION_KEY` into `.env`.
 | :--- | :--- |
 | `USE_SQLITE_FALLBACK` | Set `true` for local dev/tests without PostgreSQL; `false` for Docker/PostgreSQL |
 | `GEMINI_API_KEY` | Google AI Studio / Gemini API key for `google-genai` |
-| `GEMINI_MODEL` | Default `gemini-2.5-flash` (editable at runtime in `/settings`) |
-| `EVENT_INGEST_KEY` | Shared secret sent in `X-Ingest-Key` by `demo-app/backend` (`RELEASEGUARD_INGEST_KEY`) |
+| `GEMINI_MODEL` | Default `gemini-2.5-flash` (editable at runtime in `/settings`; live fallback automatically tries `gemini-3.5-flash-lite` -> `gemini-3.8-flash` -> `gemini-3.1-flash-lite` -> `gemini-2.5-flash-lite` if a model is overloaded or deprecated) |
+| `EVENT_INGEST_KEY` | Shared secret sent in `X-Ingest-Key` by `demo-app/backend` (`RELEASEGUARD_INGEST_KEY`); default placeholder fails startup in `APP_ENV=production` |
+| `REQUIRE_AUTH` | Require Control Plane sign-in (`false` allowed in dev; enforced `true` when `APP_ENV=production`) |
+| `AUTH_SESSION_TTL_SECONDS` | Operator session TTL in seconds (default `28800`) |
+| `AUTH_OPERATOR_EMAIL` / `AUTH_OPERATOR_PASSWORD` | Bootstrap operator credentials (optional password enables initial sign-in) |
 | `GITHUB_PAT` | *(Optional)* Personal Access Token bootstrapped into encrypted storage on startup |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | *(Optional)* GitHub OAuth App credentials for `/settings` OAuth flow |
 | `FLAGSMITH_ORG_TOKEN` | *(Optional)* Flagsmith Organisation API token (`Settings -> API Keys`) |
@@ -134,22 +137,24 @@ Services started:
 ## 6. Running All Verification Suites
 
 ```powershell
-# 1. ReleaseGuard Backend lint + 67 tests (unit, API, LangGraph supervisor, Checkout v2 E2E)
+# 1. ReleaseGuard Backend lint & 76 tests (unit, API, LangGraph supervisor, RBAC, resilience, Checkout v2 E2E)
 cd backend
 .\.venv\Scripts\ruff.exe check app tests
 .\.venv\Scripts\pytest.exe -v
 
-# 2. NovaShop Demo App lint + 12 tests
+# 2. NovaShop Demo App lint & 12 tests
 cd ..\demo-app
 ..\backend\.venv\Scripts\ruff.exe check backend tests
 ..\backend\.venv\Scripts\pytest.exe -v tests
 
-# 3. ReleaseGuard Frontend lint + production build (all 15 App Router routes)
+# 3. ReleaseGuard Frontend tests, typecheck, lint & production build (15 App Router build routes)
 cd ..\frontend
+npm test
+npx tsc --noEmit
 npm run lint
 npm run build
 
-# 4. NovaShop Demo Frontend lint + production build
+# 4. NovaShop Demo Frontend lint & production build
 cd ..\demo-app\frontend
 npm run lint
 npm run build

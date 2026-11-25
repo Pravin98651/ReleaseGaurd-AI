@@ -167,7 +167,7 @@ response = client.models.generate_content(
 )
 ```
 
-When `response.function_calls` is non-empty:
+When `response.function_calls` is non-empty (extracted from `candidates[].content.parts` alongside any Gemini 3.x `thought_signature` bytes encoded into JSON-safe Base64 for LangGraph checkpointing and restored via `types.Part(function_call=..., thought_signature=...)` on subsequent turns):
 1. Each `FunctionCall` (`call.name`, `call.args`) is captured into `SupervisorState.pending_tool_calls`.
 2. `policy_gate` checks:
    - Tool name belongs to the active specialist's allowlisted tools (or explicitly cross-routed).
@@ -236,15 +236,17 @@ Untrusted repository and PR text can contain adversarial instructions (e.g., `"I
      - If Flagsmith responds `400` indicating versioning v2 is active, immediately invalidate cache (`use_v2_feature_versioning = True`) and retry via v2 path (only when safe/idempotent within the current locked transaction).
   3. **Feature Versioning v2 Path** (`use_v2_feature_versioning == true`):
      - **Explicit Version Lifecycle (Primary)**:
-       a. `POST /api/v1/environments/{env_key}/features/{feature_id}/versions/` to create a draft version (`version_uuid`), specifying `feature_states_to_create` / `feature_states_to_update` or cloning live states.
-       b. `GET /api/v1/environments/{env_key}/features/{feature_id}/versions/{version_uuid}/featurestates/` + `PATCH .../featurestates/{fs_id}/` if fine-grained draft adjustment is required.
-       c. `POST /api/v1/environments/{env_key}/features/{feature_id}/versions/{version_uuid}/publish/` (`{"live_from": null}`) to publish atomically.
+       a. Resolves numeric Flagsmith environment ID (`env_id` from `GET /environments/{env_key}/`) because Flagsmith Cloud v2 version routes key on numeric `env_id`: `POST /api/v1/environments/{env_id}/features/{feature_id}/versions/` (`{}`) creates a draft version (`uuid`), with fallback to `env_key` for legacy/mock compatibility.
+       b. `GET /api/v1/environments/{env_id}/features/{feature_id}/versions/{version_uuid}/featurestates/` + `PATCH` / `POST .../featurestates/` updates base states and attaches `PERCENTAGE_SPLIT` segment overrides (including `feature_state_value` from the draft base state).
+       c. `POST /api/v1/environments/{env_id}/features/{feature_id}/versions/{version_uuid}/publish/` (`{}`) publishes atomically.
+     - **Live Readback Verification for v2**:
+       On v2 environments, `GET /api/v1/environments/{env_key}/featurestates/` returns only the base state (`environment_feature_version`) without segment overrides, so `get_environment_feature_states()` follows `environment_feature_version` to `/versions/{version_uuid}/featurestates/` when present to verify segment overrides cleanly.
      - **Compatibility Shorthand (Optional/Fallback)**:
-       `PATCH /api/__future__/environments/{env_key}/features/{feature_id}/` (mounted on the Flagsmith host origin under `/api/__future__/`, not `/api/v1/`) may be used as a single-call wrapper when supported, automatically creating and publishing a version on v2 environments.
+       `PATCH /api/__future__/environments/{env_key}/features/{feature_id}/` (mounted on the Flagsmith host origin under `/api/__future__/`, not `/api/v1/`) may be used when `/versions/` returns `404`/`405`.
 - **Gradual Rollout Implementation (`10% -> 25% -> 50% -> 75% -> 100%`)**:
   - **Mode A — Boolean Flag via `% Split` Segment (`percentage_split_segment`)**:
-    - Creates/updates a Project Segment (`POST/PATCH /api/v1/projects/{project_id}/segments/`) named `rg_rollout_{flag_key}` with rule operator `PERCENTAGE_SPLIT` set to target percentage (`"10"`, `"25"`, `"50"`, `"75"`).
-    - Attaches Segment Override (`enabled=true`, `segment_priority=0`) in target environment while base environment state remains `enabled=false`.
+    - Creates/updates a Project Segment (`POST/PUT /api/v1/projects/{project_id}/segments/`) named `rg_rollout_{flag_key}` with `"project": project_id` and condition `{"property": null, "operator": "PERCENTAGE_SPLIT", "value": "<pct>"}`.
+    - Attaches Segment Override (`enabled=true`, `priority=0`) in target environment while base environment state remains `enabled=false`.
     - At `100%`, enables base environment state (`enabled=true`) and disables/removes the partial segment override.
     - At `0%` (rollback), sets base state `enabled=false` AND segment override `enabled=false` (or updates split to `"0"`).
   - **Mode B — Multivariate Flag via `mv-options` (`multivariate`)**:

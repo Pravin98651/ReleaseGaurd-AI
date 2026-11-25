@@ -53,11 +53,14 @@ Stores control-plane operators and workspace identities.
 | `email` | `VARCHAR(255)` | `NOT NULL`, `UNIQUE` | Normalized lowercase email |
 | `display_name` | `VARCHAR(120)` | `NOT NULL` | Display name shown in approvals & audit logs |
 | `role` | `VARCHAR(50)` | `NOT NULL`, default `'admin'` | Enum: `admin`, `release_manager`, `engineer`, `viewer` |
+| `password_hash` | `VARCHAR(255)` | nullable | PBKDF2-HMAC-SHA256 salted password digest (`0002_auth_rbac_fields`) |
+| `github_login` | `VARCHAR(120)` | nullable, `UNIQUE` | Linked GitHub username from OAuth login (`0002_auth_rbac_fields`) |
+| `token_version` | `INTEGER` | `NOT NULL`, default `1` | Monotonic session revocation counter incremented on logout (`0002_auth_rbac_fields`) |
 | `is_active` | `BOOLEAN` | `NOT NULL`, default `true` | Active flag |
 | `created_at` | `TIMESTAMPTZ` | `NOT NULL`, default `now()` | Creation timestamp |
 | `updated_at` | `TIMESTAMPTZ` | `NOT NULL`, default `now()` | Last updated timestamp |
 
-**Indexes:** `ix_users_email` (unique on `email`).
+**Indexes:** `ix_users_email` (unique on `email`), `ix_users_github_login` (unique on `github_login`).
 
 ---
 
@@ -410,6 +413,17 @@ Single-row (or per-workspace) persisted configuration editable from `/settings`.
 | `default_guardrails` | `JSONBCompat` | `NOT NULL`, default `{}` | `{min_exposures: 100, max_expected_loss: 0.005, guardrail_max_error_rate: 0.05, soft_error_delta: 0.015, hard_error_delta: 0.030}` |
 | `health_thresholds` | `JSONBCompat` | `NOT NULL`, default `{}` | `{stale_days: 30, unused_days: 14, always_on_days: 30, always_off_days: 30}` |
 | `updated_at` | `TIMESTAMPTZ` | `NOT NULL`, default `now()` | Last updated timestamp |
+
+---
+
+### 3.16 `scheduled_jobs` (`0003_scheduling.py`)
+Persistent recurring and one-time automation schedules (`repo_sync`, `pr_analysis`, `flag_health_scan`, `experiment_monitor`, `release_monitor`, `ai_maintenance_report`, `custom_agent_task`) with IANA `timezone`, `cron_expression`, `interval_minutes`, `start_at`/`end_at`, `retry_policy`, `notification_preference`, `owner_id`, `consecutive_failures`, `missed_runs_count`, and atomic lease lock (`locked_by`, `locked_until`).
+
+### 3.17 `job_executions` (`0003_scheduling.py`)
+Immutable execution history (`scheduled_job_id` nullable FK `ON DELETE SET NULL` + `schedule_name` snapshot so history is preserved when a schedule is deleted), `execution_status`, `trigger_type`, `retry_count`, `result_summary`, `error_details`, and `agent_task_id`.
+
+### 3.18 `notifications` & 3.19 `notification_preferences` (`0004_notifications.py`)
+Persistent operator & workspace notifications (`category`, `severity`, secret-scrubbed `title`/`message`/`metadata_json`, `is_read`, `is_resolved`, `action_href`) and per-user delivery preferences (`in_app_enabled`, `severity_threshold`, `muted_categories`). Critical policy and guardrail alerts bypass suppression.
 
 ---
 

@@ -22,7 +22,8 @@ ReleaseGuard AI connects the entire pre-release and post-release lifecycle in a 
 
 ## Safety & Architecture Invariants
 
-- **Manual Function Calling Only (`AFC = Disabled`)**: Every `google-genai` call explicitly sets `AutomaticFunctionCallingConfig(disable=True)`. Gemini proposes tool calls; it never executes tools directly.
+- **Manual Function Calling Only (`AFC = Disabled`) & `thought_signature` Preservation**: Every `google-genai` call explicitly sets `AutomaticFunctionCallingConfig(disable=True)`, retries transient `429`/`503`/timeout errors with exponential backoff (`gemini-3.5-flash-lite` / `gemini-3.8-flash` / `gemini-3.1-flash-lite` / `gemini-2.5-flash-lite` fallback chain), and roundtrips Gemini 3.x `thought_signature` bytes safely through LangGraph checkpoints across multi-turn tool calls.
+- **Control Plane Authentication & RBAC**: Supports cookie + Bearer HMAC-SHA256 sessions with PBKDF2-SHA256 operator passwords and GitHub OAuth sign-in, `token_version` revocation on logout, and strict RBAC enforcement (`viewer`, `engineer`/`developer`, `release_manager`, `admin`). In `APP_ENV=production`, `REQUIRE_AUTH=true` and non-default secrets are enforced at startup.
 - **LangGraph `StateGraph` + `policy_gate`**: Every proposed tool invocation is schema-validated via Pydantic v2, classified by the Policy Engine into **Category A** (read/analyze), **Category B** (non-prod mutation / draft PR / flag creation, configurable confirmation), **Category C** (all production mutations, rollouts, rollbacks, flag archives — **always** pauses via LangGraph `interrupt()` for single-use human approval), or **FORBIDDEN** (auto-merge PR, auto-delete prod flags — no tool or endpoint exists).
 - **Single-Use Atomic Approvals**: Category B/C approvals bind a SHA-256 `action_hash`, TTL (`APPROVAL_TTL_SECONDS`), atomic SQL conditional `pending -> executing` lock, live Flagsmith/GitHub precondition revalidation (`409 Conflict` on drift), and post-mutation live state verification before resuming LangGraph via `Command(resume=...)`.
 - **Untrusted Input Isolation & Secret Safety**: GitHub repo/PR metadata and Flagsmith text are wrapped in XML sandbox delimiters (`wrap_untrusted()`) before entering prompts. OAuth/PAT/Org tokens are encrypted at rest with **Fernet** (`AES-128-CBC` + HMAC), masked via `token_hint`, and scrubbed from structured JSON logs and isolated `PatchValidator` subprocess environments.
@@ -34,7 +35,7 @@ ReleaseGuard AI connects the entire pre-release and post-release lifecycle in a 
 
 | Layer | Technologies |
 | :--- | :--- |
-| **Control Plane Frontend** | Next.js 16.4, React 19, TypeScript, Tailwind CSS 4, Recharts, Lucide Icons (11 App Router routes) |
+| **Control Plane Frontend** | Next.js 16.4, React 19, TypeScript, Tailwind CSS 4, Recharts, Lucide Icons (15 App Router routes incl. `/metrics`, `/schedules`, `/notifications`, `/system-health`) |
 | **AI & Orchestration Backend** | Python 3.14, FastAPI, LangGraph (`StateGraph` + custom JSON `SqlAlchemyCheckpointSaver`), `google-genai` SDK |
 | **Database & Migrations** | PostgreSQL 16 (`asyncpg`) primary + SQLite (`aiosqlite`) local fallback (`USE_SQLITE_FALLBACK=true`), SQLAlchemy 2.0, Alembic |
 | **Integrations** | GitHub REST & Git Data APIs (`httpx`), Flagsmith Management & Edge APIs (`httpx`, v1 + v2 versioning adapter) |
@@ -58,10 +59,10 @@ ReleaseGuard AI/
 │   │   ├── models/           # 15 portable SQLAlchemy 2.0 ORM models
 │   │   ├── schemas/          # Pydantic v2 request/response + 34 Gemini tool contracts
 │   │   └── services/         # PolicyEngine, isolated PatchValidator, SSEBus
-│   └── tests/                # 67 unit, integration & full Checkout v2 E2E tests
-├── frontend/                 # ReleaseGuard AI Next.js Control Plane (port 3000)
+│   └── tests/                # 76 unit, integration, resilience, RBAC & Checkout v2 E2E tests
+├── frontend/                 # ReleaseGuard AI Next.js Control Plane (port 3000) + Vitest suite
 ├── demo-app/                 # NovaShop Checkout v1 vs v2 Flagsmith Demo App (ports 8001 & 3001)
-├── docs/                     # Architecture, database/policy spec, API/tool contracts, setup & demo guides
+├── docs/                     # Architecture, database/policy spec, API contracts, setup, demo & verification reports
 ├── docker-compose.yml        # 5-service stack: postgres, backend, frontend, demo-backend, demo-frontend
 └── .env.example              # Complete environment variable template
 ```
@@ -117,14 +118,14 @@ cp .env.example .env
 docker compose up --build
 ```
 
-For detailed GitHub OAuth/PAT setup, Flagsmith configuration, and production environment notes, see [Setup Guide](file:///c:/Projects/ReleaseGuard%20AI/docs/setup.md). For the end-to-end hackathon walkthrough script, see [Demo Workflow Guide](file:///c:/Projects/ReleaseGuard%20AI/docs/demo-workflow.md).
+For detailed GitHub OAuth/PAT setup, Flagsmith configuration, RBAC authentication, and production environment notes, see [Setup Guide](file:///c:/Projects/ReleaseGuard%20AI/docs/setup.md). For the end-to-end hackathon walkthrough script, see [Demo Workflow Guide](file:///c:/Projects/ReleaseGuard%20AI/docs/demo-workflow.md). For live external verification results and known limitations, see [Verification & Limitations Report](file:///c:/Projects/ReleaseGuard%20AI/docs/verification-and-limitations.md).
 
 ---
 
 ## Verification & Test Suites
 
 ```powershell
-# Backend lint & full test suite (67 tests)
+# Backend lint & full test suite (84 tests)
 cd backend
 .\.venv\Scripts\ruff.exe check app tests
 .\.venv\Scripts\pytest.exe -v
@@ -134,8 +135,8 @@ cd ..\demo-app
 ..\backend\.venv\Scripts\ruff.exe check backend tests
 ..\backend\.venv\Scripts\pytest.exe -v tests
 
-# Frontend & demo-frontend build verification
-cd ..\frontend && npm run lint && npm run build
+# Frontend & demo-frontend tests, typecheck & production builds
+cd ..\frontend && npm test && npx tsc --noEmit && npm run lint && npm run build
 cd ..\demo-app\frontend && npm run lint && npm run build
 ```
 

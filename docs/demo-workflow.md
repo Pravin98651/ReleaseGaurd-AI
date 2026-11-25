@@ -9,9 +9,9 @@ This walkthrough demonstrates the complete **Checkout v1 -> Checkout v2** releas
 ## Step-by-Step Live Demo Sequence
 
 ### 1. Verify System Readiness (`/settings`)
-1. Open `http://localhost:3000/settings`.
+1. Open `http://localhost:3000/settings` (if `REQUIRE_AUTH=true`, sign in first via email/password or GitHub OAuth in the auth gate).
 2. Connect **GitHub** (PAT or OAuth) and **Flagsmith** (`org_token`, `project_id`, `development`/`staging`/`production` environment keys).
-3. Observe encrypted token masking (`token_hint`), automatic Flagsmith v1/v2 versioning detection, and **Analytics Mode** (`flagsmith_native` or `tracked_event_fallback`).
+3. Observe encrypted token masking (`token_hint`), automatic Flagsmith v1/v2 versioning detection, **Analytics Mode** (`flagsmith_native` or `tracked_event_fallback`), and **RBAC Workspace Operators** (for `ADMIN` accounts).
 
 ### 2. Sync Repository & Pull Request (`/repositories` -> `/pull-requests`)
 1. Go to `/repositories`, sync or add your repository (with `flagsmith_project_id` linked), and optionally run **Scan Flags** to detect existing Flagsmith SDK usages.

@@ -64,6 +64,21 @@
 - **`GET /api/v1/dashboard/summary`** -> `200 OK`:
   Returns `{counts: {repositories, open_prs, high_risk_prs, active_flags, active_experiments, pending_approvals, unhealthy_flags}, integration_status: {...}, recent_rollouts: [...], recent_audits: [...]}`.
 
+### 2.1b Authentication & RBAC (`/api/v1/auth`)
+- **RBAC Tiers**:
+  - `viewer`: read-only endpoints across dashboard, repos, PRs, flags, experiments, approvals list, health, audit logs.
+  - `engineer` (alias `developer`): analysis, patch generation, sandbox validation, agent chats, experiment planning, non-prod flag commands, and submitting approvals.
+  - `release_manager`: all `engineer` actions plus approving/rejecting pending **Category B / Category C** `approvals`.
+  - `admin`: full access including `GET/POST /api/v1/auth/users` and `PATCH /api/v1/settings` / `integrations` changes.
+- **Auth Endpoints**:
+  - `GET /api/v1/auth/status` -> `{require_auth, authenticated, github_oauth_enabled, user}`.
+  - `POST /api/v1/auth/login` (rate-limited 20 req/60s) -> Body: `{email, password}` -> sets HttpOnly `rg_access_token` cookie and returns `{access_token, token_type: "bearer", expires_in_seconds, user}`.
+  - `POST /api/v1/auth/logout` -> increments `user.token_version` (invalidating all prior tokens) and clears cookie.
+  - `GET /api/v1/auth/me` -> returns authenticated `UserOut`.
+  - `GET /api/v1/auth/github/start` & `POST /api/v1/auth/github/callback` -> GitHub OAuth sign-in flow returning `{access_token, user}`.
+  - `GET /api/v1/auth/users` / `POST /api/v1/auth/users` -> `ADMIN`-only workspace operator CRUD.
+- **Query Token Support**: `GET /api/v1/agent/tasks/{task_id}/stream?token=<jwt>` and `GET /api/v1/audit-logs/export?token=<jwt>` accept `?token=` in addition to `Authorization: Bearer` / HttpOnly cookie for `EventSource` and browser downloads.
+
 ### 2.2 Integrations & Settings (`/settings`)
 - **`GET /api/v1/settings`** -> `200 OK`: Returns `workspace_settings` fields (`category_b_requires_confirmation`, `approval_ttl_seconds`, `gemini_model`, `flagsmith_analytics_mode`, `default_guardrails`, `health_thresholds`) + masked `integrations` array (only `token_hint`, `scopes`, `status`, `external_account_name`).
 - **`PATCH /api/v1/settings`** -> Body: partial update of `category_b_requires_confirmation`, `approval_ttl_seconds`, `gemini_model`, `default_guardrails`, `health_thresholds`. Validates ranges, logs `settings.updated` in `audit_logs`.
@@ -83,9 +98,9 @@
 - **`POST /api/v1/repositories/{repo_id}/scan-flags`** -> Scans repository tree for Flagsmith SDK references (`is_feature_enabled`, `get_feature_value`, `hasFeature`, `getValue`) and updates `feature_flags.code_references`.
 - **`GET /api/v1/pull-requests`** -> Filters: `repository_id`, `state`, `risk_level`, `limit`, `offset`.
 - **`POST /api/v1/repositories/{repo_id}/pull-requests/sync`** -> Fetches PRs from GitHub into `pull_requests`.
-- **`GET /api/v1/pull-requests/{pr_id}`** -> PR metadata, diff summary, `confirmed_risks`, `potential_risks`, `flag_opportunities`, linked `code_changes`.
+- **`GET /api/v1/pull-requests/{pr_id}`** -> PR metadata, diff summary, live `changed_files` (`filename`, `status`, `additions`, `deletions`, `patch` when GitHub is connected), `confirmed_risks`, `potential_risks`, `flag_opportunities`, linked `code_changes`.
 - **`POST /api/v1/pull-requests/{pr_id}/analyze`** -> Category A. Runs `pr_agent` analysis (prompt-injection-hardened diff + static signals -> Risk Assessment + Flag Opportunity Detection).
-- **`POST /api/v1/pull-requests/{pr_id}/generate-patch`** -> Category A. Body: `{flag_key, flag_type?: "STANDARD"|"MULTIVARIATE", target_files?: string[]}` -> generates `CodeChange` with `before_code`, `after_code`, `unified_diff`, and `generated_tests`.
+- **`POST /api/v1/pull-requests/{pr_id}/generate-patch`** -> Category A. Body: `{flag_key, flag_type?: "STANDARD"|"MULTIVARIATE", target_files?: string[]}` -> uses context-aware Gemini generation (`gemini_context_aware` with safe `template_fallback` on malformed/unsafe output) to produce `CodeChange` with `before_code`, `after_code`, `unified_diff`, and `generated_tests`.
 - **`POST /api/v1/code-changes/{change_id}/validate`** -> Category A. Executes Isolated Temp-Dir Patch Validator (`ast`/`syntax`/`path`/`overwrite`/`ruff`/`pytest`/`eslint` in scrubbed env) and updates `validation_status` + `validation_report`.
 - **`POST /api/v1/code-changes/{change_id}/create-draft-pr`** -> Category B. Requires `validation_status == "passed"`. Creates branch + commit + `draft: true` PR in GitHub (or queues Category B approval if `category_b_requires_confirmation == true`).
 
@@ -315,3 +330,37 @@ All 34 tools run with `google-genai` `automatic_function_calling=AutomaticFuncti
 3. `frontend`: builds `./frontend`, port `3000:3000`, `depends_on: backend (condition: service_healthy)`, `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000`.
 4. `demo-backend`: builds `./demo-app/backend`, port `8001:8001`, `depends_on: backend (condition: service_healthy)`, `RELEASEGUARD_API_URL=http://backend:8000`.
 5. `demo-frontend`: builds `./demo-app/frontend`, port `3001:3001`, `depends_on: demo-backend`, `NEXT_PUBLIC_DEMO_API_URL=http://localhost:8001`.
+
+---
+
+## 5. Dashboard, Metrics, Scheduling, Notifications & System Health Endpoints
+
+### 5.1 Dashboard Overview & Scoped Aggregations
+- `GET /api/v1/dashboard/overview` — Unified payload (`metrics`, `charts` A–F, `recent_activity`, `pending_actions`, `integration_status`, `upcoming_schedules`, `data_sources`) filterable by `range` (`24h`, `7d`, `30d`, `90d`, `custom`), `start_date`, `end_date`, `environment`, `repository_id`, `flag_key`, `experiment_id`, and `event_source` (`all`, `simulator_generated`, `application_telemetry`).
+- `GET /api/v1/dashboard/metrics` — All 6 operational metric blocks (`engineering`, `releases`, `feature_flags`, `experiments`, `approvals`, `agents`) with honest prior-period `trends` (emitted only when prior-window rows exist).
+- `GET /api/v1/dashboard/charts` — Time-bucketed Chart A–F series backed directly by database rows.
+- `GET /api/v1/dashboard/activity` & `GET /api/v1/dashboard/pending-actions`.
+
+### 5.2 Metrics & Analytics Module
+- `GET /api/v1/metrics/overview` (includes `metric_definitions` documentation table)
+- `GET /api/v1/metrics/releases`, `/pull-requests`, `/feature-flags`, `/experiments`, `/agents`, `/events`
+- `GET /api/v1/metrics/export?section=...` — Streamed CSV export respecting active query filters.
+
+| Metric | Formula & Source of Truth | Availability |
+| :--- | :--- | :--- |
+| **Rollout Success Rate** | `verified_success_rollouts / total_rollouts * 100` (`rollout_history`) | Available (null when 0 rollouts) |
+| **Rollback Rate** | `rollback_events / total_rollouts * 100` (`rollout_history`) | Available |
+| **MTTR (Flag Rollback)** | Mean time from rollout step to subsequent `rollback` (`rollout_history`) | Available when rollback pairs exist |
+| **Bayesian Lift & P(Treat > Ctrl)** | Pure-Python Beta-Binomial MC over `experiment_events` (`application_telemetry` vs `simulator_generated`) | Available |
+| **CD Deployment Frequency / Lead Time** | External CI/CD deployment pipeline hook | `Unavailable` (distinct from Draft PRs / flag flips) |
+| **LLM Token Cost (USD)** | Provider billing export | `Unavailable` (raw token counts recorded when returned) |
+
+### 5.3 Persistent Scheduling (`/api/v1/schedules`)
+- `GET /api/v1/schedules`, `POST /api/v1/schedules`, `GET/PATCH/DELETE /api/v1/schedules/{id}` (deletion preserves `job_executions` history via `SET NULL` + `schedule_name` snapshot).
+- `POST /api/v1/schedules/preview` — Cron/interval + IANA timezone validation, NL prompt safety check, next 5 UTC & local run timestamps.
+- `POST /api/v1/schedules/{id}/pause`, `/resume`, `/run` (atomic lease lock + retry + timeout), `GET /{id}/executions`, `GET /schedules/executions`.
+
+### 5.4 Notifications, Workspace SSE & Deep System Health
+- `GET /api/v1/notifications`, `GET /api/v1/notifications/unread-count`, `PATCH /api/v1/notifications/{id}/read`, `PATCH /api/v1/notifications/{id}/resolve`, `POST /api/v1/notifications/read-all`, `/clear-resolved`, `GET/PATCH /api/v1/notifications/preferences`.
+- `GET /api/v1/events/stream` — Real-time workspace SSE feed with `Last-Event-ID` / `after_seq` replay and heartbeats.
+- `GET /api/v1/system/health`, `/integrations`, `/workers`, `/scheduler` — Deep probes for DB latency, API requests/5xx/latency, scheduler ticks, workers, integrations (redacted), and NovaShop demo services.
