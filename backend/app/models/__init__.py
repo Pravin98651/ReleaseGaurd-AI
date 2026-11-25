@@ -19,11 +19,16 @@ from app.models.enums import (
     IntegrationAuthMode,
     IntegrationProvider,
     IntegrationStatus,
+    JobExecutionStatus,
+    JobTriggerType,
+    NotificationCategory,
     PolicyCategory,
     PullRequestState,
     ReleaseRecommendation,
     RiskLevel,
     RolloutAction,
+    ScheduleFrequency,
+    ScheduleJobType,
     SpecialistRole,
     UserRole,
     ValidationStatus,
@@ -37,6 +42,12 @@ from app.models.flags import FeatureFlag, RolloutHistory
 from app.models.github import CodeChange, PullRequest, Repository
 from app.models.governance import Approval, AuditLog
 from app.models.identity import IntegrationConnection, User, WorkspaceSettings
+from app.models.operations import (
+    JobExecution,
+    Notification,
+    NotificationPreference,
+    ScheduledJob,
+)
 
 __all__ = [
     "ActorType",
@@ -65,7 +76,13 @@ __all__ = [
     "IntegrationConnection",
     "IntegrationProvider",
     "IntegrationStatus",
+    "JobExecution",
+    "JobExecutionStatus",
+    "JobTriggerType",
     "LangGraphCheckpoint",
+    "Notification",
+    "NotificationCategory",
+    "NotificationPreference",
     "PolicyCategory",
     "PullRequest",
     "PullRequestState",
@@ -74,6 +91,9 @@ __all__ = [
     "RiskLevel",
     "RolloutAction",
     "RolloutHistory",
+    "ScheduleFrequency",
+    "ScheduleJobType",
+    "ScheduledJob",
     "SpecialistRole",
     "User",
     "UserRole",

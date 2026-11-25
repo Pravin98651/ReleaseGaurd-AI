@@ -5,7 +5,10 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Activity,
+  BarChart3,
+  Bell,
   Bot,
+  CalendarClock,
   CheckSquare,
   ExternalLink,
   Flag,
@@ -14,33 +17,41 @@ import {
   GitPullRequest,
   HeartPulse,
   LayoutDashboard,
+  LogOut,
   Menu,
   Rocket,
   ScrollText,
+  ServerCog,
   Settings,
   ShieldCheck,
+  UserCheck,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { DEMO_APP_URL } from "@/lib/api";
+import { DEMO_APP_URL, logoutSession } from "@/lib/api";
 import { useControlPlaneStatus } from "@/hooks/use-control-plane-status";
+import { AuthGate } from "@/components/AuthGate";
+import { NotificationBell } from "@/components/NotificationBell";
 
 interface NavItem {
   href: string;
   label: string;
   icon: React.ComponentType<{ className?: string }>;
-  group: "core" | "delivery" | "governance";
+  group: "overview" | "delivery" | "governance" | "system";
   showApprovalsBadge?: boolean;
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, group: "core" },
-  { href: "/agent", label: "AI Agent", icon: Bot, group: "core" },
-  { href: "/repositories", label: "Repositories", icon: FolderGit2, group: "core" },
+  { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, group: "overview" },
+  { href: "/metrics", label: "Metrics & Analytics", icon: BarChart3, group: "overview" },
+  { href: "/notifications", label: "Notifications", icon: Bell, group: "overview" },
+  { href: "/agent", label: "AI Agent", icon: Bot, group: "delivery" },
+  { href: "/repositories", label: "Repositories", icon: FolderGit2, group: "delivery" },
   { href: "/pull-requests", label: "Pull Requests", icon: GitPullRequest, group: "delivery" },
   { href: "/feature-flags", label: "Feature Flags", icon: Flag, group: "delivery" },
-  { href: "/experiments", label: "Experiments", icon: FlaskConical, group: "delivery" },
   { href: "/releases", label: "Releases", icon: Rocket, group: "delivery" },
+  { href: "/experiments", label: "Experiments", icon: FlaskConical, group: "delivery" },
+  { href: "/flag-health", label: "Flag Health", icon: HeartPulse, group: "delivery" },
   {
     href: "/approvals",
     label: "Approvals",
@@ -48,15 +59,17 @@ const NAV_ITEMS: NavItem[] = [
     group: "governance",
     showApprovalsBadge: true,
   },
-  { href: "/flag-health", label: "Flag Health", icon: HeartPulse, group: "governance" },
+  { href: "/schedules", label: "Schedules", icon: CalendarClock, group: "governance" },
   { href: "/audit-logs", label: "Audit Logs", icon: ScrollText, group: "governance" },
-  { href: "/settings", label: "Settings", icon: Settings, group: "governance" },
+  { href: "/system-health", label: "System Health", icon: ServerCog, group: "system" },
+  { href: "/settings", label: "Settings", icon: Settings, group: "system" },
 ];
 
 const GROUP_LABELS: Record<NavItem["group"], string> = {
-  core: "Control Plane",
-  delivery: "Release & Flags",
-  governance: "Governance & Ops",
+  overview: "Overview",
+  delivery: "Release Operations",
+  governance: "Governance & Automation",
+  system: "Platform & System",
 };
 
 function HealthPill({
@@ -92,7 +105,10 @@ function HealthPill({
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const { health, backendReachable, pendingApprovalsCount } = useControlPlaneStatus();
+  const { health, authStatus, backendReachable, pendingApprovalsCount, refresh } =
+    useControlPlaneStatus();
+
+  const activeUser = authStatus?.user;
 
   const sidebarContent = (
     <div className="flex h-full flex-col bg-[#0d1119] border-r border-slate-800/90">
@@ -123,7 +139,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Navigation */}
       <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-4">
-        {(["core", "delivery", "governance"] as const).map((group) => {
+        {(["overview", "delivery", "governance", "system"] as const).map((group) => {
           const items = NAV_ITEMS.filter((item) => item.group === group);
           return (
             <div key={group}>
@@ -219,6 +235,29 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <span>Open Demo Storefront</span>
           <ExternalLink className="h-3.5 w-3.5 text-slate-500" />
         </a>
+
+        {activeUser && (
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-[#0b0f17] px-2.5 py-2">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-[11px] font-medium text-slate-200 truncate">
+                <UserCheck className="h-3 w-3 shrink-0 text-emerald-400" />
+                <span className="truncate">{activeUser.display_name}</span>
+              </div>
+              <div className="font-mono text-[10px] uppercase text-indigo-300">
+                {activeUser.role}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => void logoutSession().then(() => refresh())}
+              title="Sign out"
+              aria-label="Sign out"
+              className="rounded-md border border-slate-800 p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-100"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -274,6 +313,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 {pendingApprovalsCount === 1 ? "" : "s"}
               </Link>
             )}
+            <NotificationBell />
             <div className="hidden items-center gap-1.5 md:flex">
               <HealthPill
                 label={backendReachable ? `Backend (${health?.database ?? "ok"})` : "Backend Offline"}
@@ -288,7 +328,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </header>
 
         <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 sm:px-6 lg:px-8">
-          {children}
+          <AuthGate authStatus={authStatus} onAuthenticated={refresh}>
+            {children}
+          </AuthGate>
         </main>
       </div>
     </div>

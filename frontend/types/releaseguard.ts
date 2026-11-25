@@ -1,5 +1,40 @@
 export type PolicyCategory = "A" | "B" | "C" | "DENY" | "FORBIDDEN";
 
+export type UserRole = "admin" | "release_manager" | "engineer" | "viewer";
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  display_name: string;
+  role: UserRole | string;
+  github_login?: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AuthStatus {
+  require_auth: boolean;
+  authenticated: boolean;
+  github_oauth_enabled: boolean;
+  user?: AuthUser | null;
+}
+
+export interface AuthTokenResponse {
+  access_token: string;
+  token_type: "bearer" | string;
+  expires_in_seconds: number;
+  user: AuthUser;
+}
+
+export interface ChangedFileItem {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch: string;
+}
+
 export type RiskLevel = "low" | "medium" | "high" | "critical";
 
 export type AnalyticsMode = "flagsmith_native" | "tracked_event_fallback";
@@ -267,7 +302,8 @@ export interface PullRequest {
   potential_risks: PotentialRisk[];
   flag_opportunities: FlagOpportunity[];
   code_changes?: CodeChange[];
-  diff_summary?: string | null;
+  changed_files?: ChangedFileItem[];
+  diff_summary?: string | Record<string, unknown> | null;
   analyzed_at?: string | null;
   created_at: string;
   updated_at: string;
@@ -700,4 +736,361 @@ export interface AgentSession {
   tasks?: AgentTask[];
   created_at: string;
   updated_at: string;
+}
+
+export type TimeRangePreset = "24h" | "7d" | "30d" | "90d" | "custom";
+
+export interface MetricTrend {
+  previous_value: number;
+  delta: number;
+  percent_change?: number | null;
+  direction: "up" | "down" | "flat";
+}
+
+export interface DashboardMetrics {
+  filter: {
+    range: TimeRangePreset;
+    start_at: string;
+    end_at: string;
+    environment?: string | null;
+    repository_id?: string | null;
+    flag_key?: string | null;
+    experiment_id?: string | null;
+    event_source: "all" | "simulator_generated" | "application_telemetry";
+  };
+  engineering: {
+    connected_repositories: number;
+    synchronized_prs: number;
+    prs_analyzed: number;
+    pending_pr_analyses: number;
+    draft_prs_created: number;
+    failed_analysis_tasks: number;
+    trends?: Record<string, MetricTrend>;
+  };
+  releases: {
+    total_releases: number;
+    releases_in_progress: number;
+    successful_releases: number;
+    failed_releases: number;
+    rollbacks_executed: number;
+    releases_awaiting_approval: number;
+    release_success_rate: number | null;
+    trends?: Record<string, MetricTrend>;
+  };
+  feature_flags: {
+    total_flags: number;
+    enabled_flags: number;
+    disabled_flags: number;
+    gradual_rollout_flags: number;
+    flags_with_health_issues: number;
+    pending_flag_changes: number;
+    average_health_score: number | null;
+  };
+  experiments: {
+    total_experiments: number;
+    running_experiments: number;
+    completed_experiments: number;
+    paused_experiments: number;
+    positive_recommendation_experiments: number;
+    breached_guardrail_experiments: number;
+  };
+  approvals: {
+    pending_approvals: number;
+    approved_operations: number;
+    rejected_operations: number;
+    expired_approvals: number;
+  };
+  agents: {
+    total_agent_executions: number;
+    successful_executions: number;
+    failed_executions: number;
+    running_executions: number;
+    cancelled_executions: number;
+    awaiting_approval_executions: number;
+    average_execution_duration_seconds: number | null;
+    agent_tool_calls: number;
+    total_tokens: number | null;
+  };
+  sources: Record<string, string>;
+}
+
+export interface ExperimentPerformancePoint {
+  experiment_id: string;
+  name: string;
+  flag_key?: string | null;
+  environment_name: string;
+  status: string;
+  analytics_mode: string;
+  primary_metric: string;
+  recommendation?: string | null;
+  hypothesis: string;
+  traffic_allocation: Record<string, number>;
+  control_exposures: number;
+  control_conversions: number;
+  control_rate: number;
+  control_ci_95: number[];
+  treatment_exposures: number;
+  treatment_conversions: number;
+  treatment_rate: number;
+  treatment_ci_95: number[];
+  absolute_improvement: number;
+  relative_improvement: number;
+  prob_treatment_beats_control: number;
+  expected_loss_treatment: number;
+  payment_failed_breached: boolean;
+  payment_failed_severity: string;
+  control_error_rate: number;
+  treatment_error_rate: number;
+  sample_adequate: boolean;
+  started_at?: string | null;
+  ended_at?: string | null;
+  simulator_event_count: number;
+  telemetry_event_count: number;
+}
+
+export interface DashboardCharts {
+  filter: DashboardMetrics["filter"];
+  release_activity: Array<{
+    bucket: string;
+    label: string;
+    releases_created: number;
+    releases_completed: number;
+    releases_failed: number;
+    rollbacks: number;
+  }>;
+  experiment_performance: ExperimentPerformancePoint[];
+  flag_distribution: Array<{ key: string; name: string; count: number }>;
+  agent_activity: Array<{
+    bucket: string;
+    label: string;
+    successful: number;
+    failed: number;
+    running: number;
+    awaiting_approval: number;
+    avg_duration_seconds: number | null;
+  }>;
+  telemetry_activity: Array<{
+    bucket: string;
+    label: string;
+    total_events: number;
+    checkout_started: number;
+    checkout_completed: number;
+    payment_failed: number;
+    checkout_abandoned: number;
+    simulator_events: number;
+    telemetry_events: number;
+  }>;
+  release_health: Array<{ key: string; name: string; count: number }>;
+  telemetry_totals: {
+    total_events?: number;
+    simulator_events?: number;
+    application_telemetry_events?: number;
+  };
+}
+
+export interface ActivityFeedItem {
+  id: string;
+  event_type: string;
+  title: string;
+  description: string;
+  timestamp: string;
+  resource_type: string;
+  resource_id?: string | null;
+  resource_label?: string | null;
+  environment_name?: string | null;
+  actor: string;
+  status: string;
+  href: string;
+}
+
+export interface PendingActionItem {
+  id: string;
+  category: string;
+  severity: "critical" | "high" | "medium" | "info";
+  title: string;
+  description: string;
+  resource_type: string;
+  resource_id?: string | null;
+  environment_name?: string | null;
+  created_at: string;
+  action_label: string;
+  href: string;
+}
+
+export interface DashboardOverview {
+  metrics: DashboardMetrics;
+  charts: DashboardCharts;
+  recent_activity: ActivityFeedItem[];
+  pending_actions: PendingActionItem[];
+  integration_status: Record<string, unknown>;
+  upcoming_schedules: Array<Record<string, unknown>>;
+  data_sources: Record<string, unknown>;
+}
+
+export type ScheduleJobType =
+  | "repo_sync"
+  | "pr_analysis"
+  | "flag_health_scan"
+  | "experiment_monitor"
+  | "release_monitor"
+  | "ai_maintenance_report"
+  | "custom_agent_task";
+
+export type ScheduleFrequency =
+  | "once"
+  | "interval_minutes"
+  | "hourly"
+  | "daily"
+  | "weekly"
+  | "monthly"
+  | "cron";
+
+export type JobExecutionStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled"
+  | "skipped"
+  | "retrying";
+
+export interface ScheduleRetryPolicy {
+  max_retries: number;
+  retry_delay_seconds: number;
+  timeout_seconds: number;
+}
+
+export interface ScheduleNotificationPref {
+  on_success: boolean;
+  on_failure: boolean;
+}
+
+export interface ScheduledJobItem {
+  id: string;
+  name: string;
+  description?: string | null;
+  job_type: ScheduleJobType;
+  frequency: ScheduleFrequency;
+  cron_expression?: string | null;
+  interval_minutes?: number | null;
+  timezone: string;
+  start_at?: string | null;
+  end_at?: string | null;
+  configuration: Record<string, unknown>;
+  retry_policy: ScheduleRetryPolicy;
+  notification_preference: ScheduleNotificationPref;
+  enabled: boolean;
+  owner_id?: string | null;
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  last_status?: string | null;
+  consecutive_failures: number;
+  missed_runs_count: number;
+  human_description: string;
+  next_runs_preview: Array<{ utc: string; local: string }>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface JobExecutionItem {
+  id: string;
+  scheduled_job_id?: string | null;
+  schedule_name: string;
+  job_type: ScheduleJobType;
+  execution_status: JobExecutionStatus;
+  trigger_type: "scheduled" | "manual" | "misfire_recovery" | "retry";
+  started_at?: string | null;
+  completed_at?: string | null;
+  input_payload: Record<string, unknown>;
+  result_summary?: Record<string, unknown> | null;
+  error_details?: string | null;
+  retry_count: number;
+  agent_task_id?: string | null;
+  resource_type?: string | null;
+  resource_id?: string | null;
+  created_at: string;
+}
+
+export interface SchedulePreviewResponse {
+  valid: boolean;
+  frequency: string;
+  cron_expression?: string | null;
+  interval_minutes?: number | null;
+  timezone: string;
+  human_description: string;
+  next_runs: Array<{ utc: string; local: string }>;
+  nl_plan?: Record<string, unknown> | null;
+  policy_notice?: string;
+}
+
+export type NotificationSeverity = "info" | "warning" | "high" | "critical";
+
+export interface NotificationItem {
+  id: string;
+  user_id?: string | null;
+  category: string;
+  severity: NotificationSeverity | string;
+  title: string;
+  message: string;
+  resource_type?: string | null;
+  resource_id?: string | null;
+  environment_name?: string | null;
+  action_href?: string | null;
+  metadata_json: Record<string, unknown>;
+  is_read: boolean;
+  read_at?: string | null;
+  is_resolved: boolean;
+  resolved_at?: string | null;
+  created_at: string;
+}
+
+export interface NotificationPreference {
+  in_app_enabled: boolean;
+  severity_threshold: NotificationSeverity;
+  muted_categories: string[];
+  updated_at?: string | null;
+}
+
+export interface DeepSystemHealth {
+  status: "healthy" | "degraded" | "unhealthy" | string;
+  checked_at: string;
+  database: { status: string; latency_ms: number; error?: string | null };
+  backend_api: {
+    status: string;
+    requests_total: number;
+    errors_5xx: number;
+    avg_latency_ms?: number | null;
+    last_error?: string | null;
+  };
+  scheduler: {
+    instance_id: string;
+    running: boolean;
+    poll_interval_seconds: number;
+    started_at?: string | null;
+    last_tick_at?: string | null;
+    ticks_completed: number;
+    last_error?: string | null;
+    attention_schedules: number;
+  };
+  workers: {
+    active_agent_tasks: number;
+    failed_agent_tasks: number;
+    running_job_executions: number;
+    failed_job_executions: number;
+  };
+  integrations: {
+    github: Record<string, unknown>;
+    flagsmith: Record<string, unknown>;
+    gemini: Record<string, unknown>;
+    recent_errors: Array<{
+      id: string;
+      event_action: string;
+      created_at?: string | null;
+      details: Record<string, unknown>;
+    }>;
+  };
+  demo_app: {
+    backend: { status: string; http_status?: number; latency_ms?: number | null; url?: string; error?: string };
+    frontend: { status: string; http_status?: number; latency_ms?: number | null; url?: string; error?: string };
+  };
 }

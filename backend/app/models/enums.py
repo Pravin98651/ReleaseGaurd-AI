@@ -178,6 +178,58 @@ class AuditStatus(StrEnum):
     PENDING = "pending"
 
 
+class ScheduleJobType(StrEnum):
+    REPO_SYNC = "repo_sync"
+    PR_ANALYSIS = "pr_analysis"
+    FLAG_HEALTH_SCAN = "flag_health_scan"
+    EXPERIMENT_MONITOR = "experiment_monitor"
+    RELEASE_MONITOR = "release_monitor"
+    AI_MAINTENANCE_REPORT = "ai_maintenance_report"
+    CUSTOM_AGENT_TASK = "custom_agent_task"
+
+
+class ScheduleFrequency(StrEnum):
+    ONCE = "once"
+    INTERVAL_MINUTES = "interval_minutes"
+    HOURLY = "hourly"
+    DAILY = "daily"
+    WEEKLY = "weekly"
+    MONTHLY = "monthly"
+    CRON = "cron"
+
+
+class JobExecutionStatus(StrEnum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    SKIPPED = "skipped"
+    RETRYING = "retrying"
+
+
+class JobTriggerType(StrEnum):
+    SCHEDULED = "scheduled"
+    MANUAL = "manual"
+    MISFIRE_RECOVERY = "misfire_recovery"
+    RETRY = "retry"
+
+
+class NotificationCategory(StrEnum):
+    APPROVAL_REQUIRED = "approval_required"
+    APPROVAL_DECIDED = "approval_decided"
+    GUARDRAIL_BREACH = "guardrail_breach"
+    ROLLBACK_TRIGGERED = "rollback_triggered"
+    PR_HIGH_RISK = "pr_high_risk"
+    DRAFT_PR_CREATED = "draft_pr_created"
+    AGENT_FAILED = "agent_failed"
+    FLAG_HEALTH_ALERT = "flag_health_alert"
+    SCHEDULE_COMPLETED = "schedule_completed"
+    SCHEDULE_FAILED = "schedule_failed"
+    INTEGRATION_ERROR = "integration_error"
+    SYSTEM_ALERT = "system_alert"
+
+
 def str_enum(enum_cls: type[StrEnum], length: int = 50, **kwargs: Any) -> SAEnum:
     """Create a portable non-native SQLAlchemy Enum storing StrEnum values."""
     return SAEnum(

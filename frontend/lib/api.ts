@@ -4,6 +4,9 @@ import type {
   AgentTask,
   Approval,
   AuditLogEntry,
+  AuthStatus,
+  AuthTokenResponse,
+  AuthUser,
   BranchInfo,
   CodeChange,
   DashboardSummary,
@@ -77,6 +80,23 @@ function buildQuery(params?: Record<string, string | number | boolean | undefine
   return qs ? `?${qs}` : "";
 }
 
+export const AUTH_TOKEN_STORAGE_KEY = "rg_auth_token";
+
+export function getStoredAuthToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(AUTH_TOKEN_STORAGE_KEY);
+}
+
+export function setStoredAuthToken(token: string | null): void {
+  if (typeof window === "undefined") return;
+  if (token) {
+    window.localStorage.setItem(AUTH_TOKEN_STORAGE_KEY, token);
+  } else {
+    window.localStorage.removeItem(AUTH_TOKEN_STORAGE_KEY);
+  }
+  window.dispatchEvent(new CustomEvent("rg:auth-changed"));
+}
+
 async function requestJson<T>(
   path: string,
   init: RequestInit = {}
@@ -86,12 +106,17 @@ async function requestJson<T>(
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
+  const storedTok = getStoredAuthToken();
+  if (storedTok && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${storedTok}`);
+  }
 
   let res: Response;
   try {
     res = await fetch(url, {
       ...init,
       headers,
+      credentials: "include",
       cache: "no-store",
     });
   } catch (networkErr) {
@@ -116,6 +141,9 @@ async function requestJson<T>(
   }
 
   if (!res.ok) {
+    if (res.status === 401 && !path.startsWith("/api/v1/auth/login")) {
+      setStoredAuthToken(null);
+    }
     if (parsed && typeof parsed === "object" && "error" in parsed) {
       const errObj = (parsed as { error: Record<string, unknown> }).error;
       throw new ApiError({
@@ -888,7 +916,76 @@ export function getAuditLogsExportUrl(params: {
   from?: string;
   to?: string;
 }): string {
-  return `${API_BASE_URL}/api/v1/audit-logs/export${buildQuery(params)}`;
+  const tok = getStoredAuthToken();
+  return `${API_BASE_URL}/api/v1/audit-logs/export${buildQuery({
+    ...params,
+    token: tok || undefined,
+  })}`;
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  const { data } = await requestJson<AuthStatus>("/api/v1/auth/status");
+  return data;
+}
+
+export async function loginWithPassword(payload: {
+  email: string;
+  password: string;
+}): Promise<AuthTokenResponse> {
+  const { data } = await requestJson<AuthTokenResponse>("/api/v1/auth/login", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  setStoredAuthToken(data.access_token);
+  return data;
+}
+
+export async function logoutSession(): Promise<void> {
+  try {
+    await requestJson("/api/v1/auth/logout", { method: "POST" });
+  } finally {
+    setStoredAuthToken(null);
+  }
+}
+
+export async function startGithubAuthLogin(): Promise<{
+  authorize_url: string;
+  state: string;
+}> {
+  const { data } = await requestJson<{ authorize_url: string; state: string }>(
+    "/api/v1/auth/github/start"
+  );
+  return data;
+}
+
+export async function completeGithubAuthCallback(payload: {
+  code: string;
+  state: string;
+}): Promise<AuthTokenResponse> {
+  const { data } = await requestJson<AuthTokenResponse>("/api/v1/auth/github/callback", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  setStoredAuthToken(data.access_token);
+  return data;
+}
+
+export async function listWorkspaceUsers(): Promise<AuthUser[]> {
+  const { data } = await requestJson<AuthUser[]>("/api/v1/auth/users");
+  return data;
+}
+
+export async function createWorkspaceUser(payload: {
+  email: string;
+  display_name: string;
+  password: string;
+  role: string;
+}): Promise<AuthUser> {
+  const { data } = await requestJson<AuthUser>("/api/v1/auth/users", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  return data;
 }
 
 export async function listRolloutHistory(params?: {
@@ -901,4 +998,355 @@ export async function listRolloutHistory(params?: {
     PaginatedResponse<RolloutHistoryEntry> | RolloutHistoryEntry[]
   >(`/api/v1/rollout-history${buildQuery(params)}`);
   return normalizeList(data);
+}
+
+export interface DashboardQueryFilters {
+  [key: string]: string | number | boolean | null | undefined;
+  range?: "24h" | "7d" | "30d" | "90d" | "custom";
+  start_date?: string;
+  end_date?: string;
+  environment?: string;
+  repository_id?: string;
+  flag_key?: string;
+  experiment_id?: string;
+  event_source?: "all" | "simulator_generated" | "application_telemetry";
+}
+
+export async function getDashboardOverview(
+  params?: DashboardQueryFilters
+): Promise<import("@/types/releaseguard").DashboardOverview> {
+  const { data } = await requestJson<import("@/types/releaseguard").DashboardOverview>(
+    `/api/v1/dashboard/overview${buildQuery(params)}`
+  );
+  return data;
+}
+
+export async function getDashboardMetrics(
+  params?: DashboardQueryFilters
+): Promise<import("@/types/releaseguard").DashboardMetrics> {
+  const { data } = await requestJson<import("@/types/releaseguard").DashboardMetrics>(
+    `/api/v1/dashboard/metrics${buildQuery(params)}`
+  );
+  return data;
+}
+
+export async function getDashboardCharts(
+  params?: DashboardQueryFilters
+): Promise<import("@/types/releaseguard").DashboardCharts> {
+  const { data } = await requestJson<import("@/types/releaseguard").DashboardCharts>(
+    `/api/v1/dashboard/charts${buildQuery(params)}`
+  );
+  return data;
+}
+
+export async function getDashboardActivity(params?: {
+  limit?: number;
+  environment?: string;
+}): Promise<import("@/types/releaseguard").ActivityFeedItem[]> {
+  const { data } = await requestJson<import("@/types/releaseguard").ActivityFeedItem[]>(
+    `/api/v1/dashboard/activity${buildQuery(params)}`
+  );
+  return Array.isArray(data) ? data : [];
+}
+
+export async function getDashboardPendingActions(params?: {
+  environment?: string;
+}): Promise<import("@/types/releaseguard").PendingActionItem[]> {
+  const { data } = await requestJson<import("@/types/releaseguard").PendingActionItem[]>(
+    `/api/v1/dashboard/pending-actions${buildQuery(params)}`
+  );
+  return Array.isArray(data) ? data : [];
+}
+
+// Phase 3: Metrics & Analytics
+export async function getMetricsOverview(params?: DashboardQueryFilters): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(`/api/v1/metrics/overview${buildQuery(params)}`);
+  return data;
+}
+
+export async function getReleaseMetrics(params?: DashboardQueryFilters): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(`/api/v1/metrics/releases${buildQuery(params)}`);
+  return data;
+}
+
+export async function getPrMetrics(params?: DashboardQueryFilters): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(`/api/v1/metrics/pull-requests${buildQuery(params)}`);
+  return data;
+}
+
+export async function getFeatureFlagMetrics(params?: DashboardQueryFilters): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(`/api/v1/metrics/feature-flags${buildQuery(params)}`);
+  return data;
+}
+
+export async function getExperimentMetrics(params?: DashboardQueryFilters): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(`/api/v1/metrics/experiments${buildQuery(params)}`);
+  return data;
+}
+
+export async function getAgentMetrics(params?: DashboardQueryFilters): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(`/api/v1/metrics/agents${buildQuery(params)}`);
+  return data;
+}
+
+export async function getEventMetrics(params?: DashboardQueryFilters): Promise<Record<string, unknown>> {
+  const { data } = await requestJson<Record<string, unknown>>(`/api/v1/metrics/events${buildQuery(params)}`);
+  return data;
+}
+
+export function getMetricsExportUrl(
+  section: "releases" | "pull_requests" | "feature_flags" | "experiments" | "agents" | "events",
+  params?: DashboardQueryFilters
+): string {
+  const tok = getStoredAuthToken();
+  return `${API_BASE_URL}/api/v1/metrics/export${buildQuery({ ...params, section, token: tok || undefined })}`;
+}
+
+// Phase 4: Persistent Scheduling
+export interface SchedulePayloadInput {
+  name: string;
+  description?: string | null;
+  job_type: import("@/types/releaseguard").ScheduleJobType;
+  frequency: import("@/types/releaseguard").ScheduleFrequency;
+  cron_expression?: string | null;
+  interval_minutes?: number | null;
+  timezone: string;
+  start_at?: string | null;
+  end_at?: string | null;
+  configuration?: Record<string, unknown>;
+  retry_policy?: import("@/types/releaseguard").ScheduleRetryPolicy;
+  notification_preference?: import("@/types/releaseguard").ScheduleNotificationPref;
+  enabled?: boolean;
+}
+
+export async function getSchedules(params?: {
+  job_type?: string;
+  enabled?: boolean;
+  environment?: string;
+  last_status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PaginatedResponse<import("@/types/releaseguard").ScheduledJobItem>> {
+  const { data } = await requestJson<PaginatedResponse<import("@/types/releaseguard").ScheduledJobItem>>(
+    `/api/v1/schedules${buildQuery(params)}`
+  );
+  return data;
+}
+
+export async function previewSchedule(body: {
+  frequency?: string;
+  cron_expression?: string | null;
+  interval_minutes?: number | null;
+  timezone: string;
+  start_at?: string | null;
+  end_at?: string | null;
+  nl_prompt?: string | null;
+}): Promise<import("@/types/releaseguard").SchedulePreviewResponse> {
+  const { data } = await requestJson<import("@/types/releaseguard").SchedulePreviewResponse>(
+    "/api/v1/schedules/preview",
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    }
+  );
+  return data;
+}
+
+export async function createSchedule(
+  body: SchedulePayloadInput
+): Promise<import("@/types/releaseguard").ScheduledJobItem> {
+  const { data } = await requestJson<import("@/types/releaseguard").ScheduledJobItem>("/api/v1/schedules", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data;
+}
+
+export async function updateSchedule(
+  id: string,
+  body: Partial<SchedulePayloadInput>
+): Promise<import("@/types/releaseguard").ScheduledJobItem> {
+  const { data } = await requestJson<import("@/types/releaseguard").ScheduledJobItem>(`/api/v1/schedules/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+  return data;
+}
+
+export async function deleteSchedule(id: string): Promise<{ deleted: boolean; history_preserved: boolean }> {
+  const { data } = await requestJson<{ deleted: boolean; history_preserved: boolean }>(
+    `/api/v1/schedules/${id}`,
+    { method: "DELETE" }
+  );
+  return data;
+}
+
+export async function pauseSchedule(id: string): Promise<import("@/types/releaseguard").ScheduledJobItem> {
+  const { data } = await requestJson<import("@/types/releaseguard").ScheduledJobItem>(
+    `/api/v1/schedules/${id}/pause`,
+    { method: "POST" }
+  );
+  return data;
+}
+
+export async function resumeSchedule(id: string): Promise<import("@/types/releaseguard").ScheduledJobItem> {
+  const { data } = await requestJson<import("@/types/releaseguard").ScheduledJobItem>(
+    `/api/v1/schedules/${id}/resume`,
+    { method: "POST" }
+  );
+  return data;
+}
+
+export async function runScheduleNow(id: string): Promise<import("@/types/releaseguard").JobExecutionItem> {
+  const { data } = await requestJson<import("@/types/releaseguard").JobExecutionItem>(
+    `/api/v1/schedules/${id}/run`,
+    { method: "POST" }
+  );
+  return data;
+}
+
+export async function getScheduleExecutions(
+  id: string,
+  params?: { limit?: number; offset?: number }
+): Promise<PaginatedResponse<import("@/types/releaseguard").JobExecutionItem>> {
+  const { data } = await requestJson<PaginatedResponse<import("@/types/releaseguard").JobExecutionItem>>(
+    `/api/v1/schedules/${id}/executions${buildQuery(params)}`
+  );
+  return data;
+}
+
+export async function getAllJobExecutions(params?: {
+  scheduled_job_id?: string;
+  job_type?: string;
+  status?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PaginatedResponse<import("@/types/releaseguard").JobExecutionItem>> {
+  const { data } = await requestJson<PaginatedResponse<import("@/types/releaseguard").JobExecutionItem>>(
+    `/api/v1/schedules/executions${buildQuery(params)}`
+  );
+  return data;
+}
+
+// Phase 5: Notifications, Workspace SSE & Deep System Health
+export async function listNotifications(params?: {
+  category?: string;
+  severity?: string;
+  unread_only?: boolean;
+  unresolved_only?: boolean;
+  limit?: number;
+  offset?: number;
+}): Promise<PaginatedResponse<import("@/types/releaseguard").NotificationItem>> {
+  const { data } = await requestJson<PaginatedResponse<import("@/types/releaseguard").NotificationItem>>(
+    `/api/v1/notifications${buildQuery(params)}`
+  );
+  return data;
+}
+
+export async function getUnreadNotificationCount(): Promise<{
+  unread_count: number;
+  critical_unread_count: number;
+}> {
+  const { data } = await requestJson<{ unread_count: number; critical_unread_count: number }>(
+    "/api/v1/notifications/unread-count"
+  );
+  return data;
+}
+
+export async function markNotificationRead(
+  id: string
+): Promise<import("@/types/releaseguard").NotificationItem> {
+  const { data } = await requestJson<import("@/types/releaseguard").NotificationItem>(
+    `/api/v1/notifications/${id}/read`,
+    { method: "PATCH" }
+  );
+  return data;
+}
+
+export async function resolveNotification(
+  id: string
+): Promise<import("@/types/releaseguard").NotificationItem> {
+  const { data } = await requestJson<import("@/types/releaseguard").NotificationItem>(
+    `/api/v1/notifications/${id}/resolve`,
+    { method: "PATCH" }
+  );
+  return data;
+}
+
+export async function markAllNotificationsRead(): Promise<{ marked_read: number }> {
+  const { data } = await requestJson<{ marked_read: number }>("/api/v1/notifications/read-all", {
+    method: "POST",
+  });
+  return data;
+}
+
+export async function clearResolvedNotifications(): Promise<{ cleared_count: number }> {
+  const { data } = await requestJson<{ cleared_count: number }>(
+    "/api/v1/notifications/clear-resolved",
+    { method: "POST" }
+  );
+  return data;
+}
+
+export async function getNotificationPreferences(): Promise<
+  import("@/types/releaseguard").NotificationPreference
+> {
+  const { data } = await requestJson<import("@/types/releaseguard").NotificationPreference>(
+    "/api/v1/notifications/preferences"
+  );
+  return data;
+}
+
+export async function updateNotificationPreferences(
+  patch: Partial<import("@/types/releaseguard").NotificationPreference>
+): Promise<import("@/types/releaseguard").NotificationPreference> {
+  const { data } = await requestJson<import("@/types/releaseguard").NotificationPreference>(
+    "/api/v1/notifications/preferences",
+    {
+      method: "PATCH",
+      body: JSON.stringify(patch),
+    }
+  );
+  return data;
+}
+
+export function getWorkspaceStreamUrl(afterSeq = 0): string {
+  const tok = getStoredAuthToken();
+  return `${API_BASE_URL}/api/v1/events/stream${buildQuery({
+    after_seq: afterSeq > 0 ? afterSeq : undefined,
+    token: tok || undefined,
+  })}`;
+}
+
+export async function getDeepSystemHealth(): Promise<
+  import("@/types/releaseguard").DeepSystemHealth
+> {
+  const { data } = await requestJson<import("@/types/releaseguard").DeepSystemHealth>(
+    "/api/v1/system/health"
+  );
+  return data;
+}
+
+export async function getSystemWorkersStatus(): Promise<{
+  agent_tasks: Array<Record<string, unknown>>;
+  job_executions: Array<Record<string, unknown>>;
+}> {
+  const { data } = await requestJson<{
+    agent_tasks: Array<Record<string, unknown>>;
+    job_executions: Array<Record<string, unknown>>;
+  }>("/api/v1/system/workers");
+  return data;
+}
+
+export async function getSystemSchedulerStatus(): Promise<{
+  worker: Record<string, unknown>;
+  counts: Record<string, number>;
+  upcoming: Array<Record<string, unknown>>;
+}> {
+  const { data } = await requestJson<{
+    worker: Record<string, unknown>;
+    counts: Record<string, number>;
+    upcoming: Array<Record<string, unknown>>;
+  }>("/api/v1/system/scheduler");
+  return data;
 }

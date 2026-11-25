@@ -25,6 +25,7 @@ from app.agents.tools.experiment_tools import (
 from app.analytics.bayesian import analyze_experiment_events
 from app.analytics.recommendations import evaluate_recommendation
 from app.api.deps import (
+    AuthenticatedOperator,
     DBSession,
     DefaultOperator,
     build_gemini_client_from_app,
@@ -70,6 +71,7 @@ def _serialize_experiment(exp: Experiment, flag_key: str | None) -> dict[str, An
 @experiments_router.get("")
 async def list_experiments(
     session: DBSession,
+    _: AuthenticatedOperator,
     limit: Annotated[int, Query(ge=1, le=200)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, Any]:
@@ -342,6 +344,7 @@ async def get_experiment_analysis(
     exp_id: uuid.UUID,
     request: Request,
     session: DBSession,
+    _: AuthenticatedOperator,
 ) -> BayesianAnalysisResponse:
     """Category A: Compute pure-Python Bayesian Beta-Binomial posterior and guardrails."""
     exp = await session.get(Experiment, exp_id)
@@ -365,6 +368,7 @@ async def get_experiment_recommendation(
     exp_id: uuid.UUID,
     request: Request,
     session: DBSession,
+    _: AuthenticatedOperator,
 ) -> dict[str, Any]:
     """Category A: Compute deterministic 5-state release recommendation + plain-English narrative."""
     exp = await session.get(Experiment, exp_id)
@@ -414,6 +418,26 @@ async def get_experiment_recommendation(
     exp.latest_bayesian_result = analysis.model_dump(mode="json")
     exp.latest_recommendation = ReleaseRecommendation(rec.recommendation.value)
     exp.recommendation_rationale = narrative
+    if (
+        analysis.guardrails.payment_failed.breached
+        or exp.latest_recommendation == ReleaseRecommendation.RECOMMEND_ROLLBACK
+    ):
+        from app.models import NotificationCategory
+        from app.services.notification_service import create_notification
+
+        await create_notification(
+            session,
+            category=NotificationCategory.GUARDRAIL_BREACH,
+            severity="critical",
+            title=f"Guardrail Breach / Rollback Advised: {exp.name}",
+            message=rec.rationale[:300],
+            resource_type="experiment",
+            resource_id=str(exp.id),
+            environment_name=exp.environment_name,
+            action_href=f"/experiments?id={exp.id}",
+            metadata={"recommendation": rec.recommendation.value},
+            dedupe_minutes=15,
+        )
     await session.commit()
 
     trigger_strings = [t.description for t in rec.triggers if t.met] or [
