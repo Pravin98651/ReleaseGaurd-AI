@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import secrets
 import uuid
 from datetime import timedelta
+from urllib.parse import urlsplit
 
 import httpx
 from sqlalchemy import select
@@ -265,6 +267,33 @@ class DeveloperNotificationService:
     """Manages Slack & Discord webhook integrations and tracks NotificationDelivery."""
 
     @staticmethod
+    def _validate_webhook_url(webhook_url: str, provider: IntegrationProvider) -> None:
+        """Reject non-HTTPS URLs and SSRF targets (localhost, link-local, or private IPs)."""
+        parsed = urlsplit(webhook_url.strip())
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise DXIntegrationError("Webhook URL must be a valid HTTPS URL.")
+        host = parsed.hostname.lower().rstrip(".")
+        if (
+            host in {"localhost", "metadata.google.internal"}
+            or host.endswith(".local")
+            or host.endswith(".internal")
+            or host.endswith(".localhost")
+        ):
+            raise DXIntegrationError("Webhook hostname is not permitted (SSRF protection).")
+        try:
+            ip = ipaddress.ip_address(host)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast or ip.is_reserved:
+                raise DXIntegrationError("Private or loopback webhook IP addresses are not permitted.")
+        except ValueError:
+            pass
+        if provider == IntegrationProvider.SLACK and "slack.com" not in host:
+            raise DXIntegrationError("Slack webhook URL must use an official hooks.slack.com host.")
+        if provider == IntegrationProvider.DISCORD and not any(
+            d in host for d in ("discord.com", "discordapp.com")
+        ):
+            raise DXIntegrationError("Discord webhook URL must use an official discord.com host.")
+
+    @staticmethod
     async def connect_provider(
         session: AsyncSession,
         *,
@@ -275,8 +304,7 @@ class DeveloperNotificationService:
     ) -> IntegrationConnection:
         if provider not in (IntegrationProvider.SLACK, IntegrationProvider.DISCORD):
             raise DXIntegrationError("Unsupported notification provider.")
-        if not webhook_url.startswith("https://"):
-            raise DXIntegrationError("Webhook URL must use HTTPS.")
+        DeveloperNotificationService._validate_webhook_url(webhook_url, provider)
 
         existing = (
             await session.execute(

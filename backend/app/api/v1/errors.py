@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.agents.gemini_client import GeminiConfigurationError
 from app.core.security import redact_dict, scrub_secrets
@@ -24,6 +27,11 @@ from app.services.policy_engine import (
 )
 
 
+logger = logging.getLogger("releaseguard.errors")
+
+_RETRYABLE_HTTP_CODES = frozenset({408, 429, 502, 503, 504})
+
+
 class APIException(Exception):
     """Application exception rendered as standard {"error": {...}} envelope."""
 
@@ -33,12 +41,16 @@ class APIException(Exception):
         code: str,
         message: str,
         details: dict[str, Any] | None = None,
+        retryable: bool | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
         self.message = message
         self.details = details or {}
+        self.retryable = (
+            retryable if retryable is not None else status_code in _RETRYABLE_HTTP_CODES
+        )
 
 
 def _request_id(request: Request) -> str:
@@ -55,7 +67,11 @@ def _error_response(
     code: str,
     message: str,
     details: dict[str, Any] | None = None,
+    retryable: bool | None = None,
 ) -> JSONResponse:
+    is_retryable = (
+        retryable if retryable is not None else status_code in _RETRYABLE_HTTP_CODES
+    )
     return JSONResponse(
         status_code=status_code,
         content={
@@ -64,6 +80,8 @@ def _error_response(
                 "message": scrub_secrets(str(message)),
                 "details": redact_dict(details or {}),
                 "request_id": _request_id(request),
+                "retryable": is_retryable,
+                "timestamp": datetime.now(UTC).isoformat(),
             }
         },
     )
@@ -80,6 +98,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             code=exc.code,
             message=exc.message,
             details=exc.details,
+            retryable=exc.retryable,
         )
 
     @app.exception_handler(HTTPException)
@@ -238,11 +257,43 @@ def register_exception_handlers(app: FastAPI) -> None:
             message=str(exc),
         )
 
+    @app.exception_handler(TimeoutError)
+    async def handle_timeout_error(request: Request, exc: TimeoutError) -> JSONResponse:
+        logger.warning("Request timeout [request_id=%s]: %s", _request_id(request), exc)
+        return _error_response(
+            request,
+            status_code=504,
+            code="REQUEST_TIMEOUT",
+            message="Operation timed out; please retry.",
+            retryable=True,
+        )
+
+    @app.exception_handler(SQLAlchemyError)
+    async def handle_db_error(request: Request, exc: SQLAlchemyError) -> JSONResponse:
+        logger.error(
+            "Database error [request_id=%s]: %s",
+            _request_id(request),
+            scrub_secrets(str(exc))[:300],
+        )
+        return _error_response(
+            request,
+            status_code=503,
+            code="DATABASE_UNAVAILABLE",
+            message="Database operation failed; please retry.",
+            retryable=True,
+        )
+
     @app.exception_handler(Exception)
     async def handle_unexpected(request: Request, exc: Exception) -> JSONResponse:
+        logger.exception(
+            "Unhandled server exception [request_id=%s]: %s",
+            _request_id(request),
+            type(exc).__name__,
+        )
         return _error_response(
             request,
             status_code=500,
             code="INTERNAL_SERVER_ERROR",
             message=f"Unexpected server error: {type(exc).__name__}",
+            retryable=False,
         )

@@ -172,40 +172,60 @@ async def get_execution_overview(
     session: DBSession,
     _: AuthenticatedOperator,
 ) -> AgentExecutionOverviewOut:
-    rows = list((await session.execute(select(AgentExecution))).scalars().all())
-    tool_calls = list((await session.execute(select(AgentToolCall))).scalars().all())
+    status_rows = (
+        await session.execute(
+            select(AgentExecution.status, func.count(AgentExecution.id)).group_by(
+                AgentExecution.status
+            )
+        )
+    ).all()
+    counts_by_status = {status: int(cnt) for status, cnt in status_rows}
+    total_execs = sum(counts_by_status.values())
+
+    avg_dur_raw = (
+        await session.execute(
+            select(func.avg(AgentExecution.duration_ms)).where(
+                AgentExecution.duration_ms.is_not(None)
+            )
+        )
+    ).scalar_one_or_none()
+    avg_dur = round(float(avg_dur_raw), 1) if avg_dur_raw is not None else None
+
+    tool_rows = (
+        await session.execute(
+            select(AgentToolCall.status, func.count(AgentToolCall.id)).group_by(
+                AgentToolCall.status
+            )
+        )
+    ).all()
+    tool_counts = {status: int(cnt) for status, cnt in tool_rows}
+    total_tool_calls = sum(tool_counts.values())
+    failed_tools = tool_counts.get(AgentToolCallStatus.FAILED, 0) + tool_counts.get(
+        AgentToolCallStatus.TIMED_OUT, 0
+    )
+    tool_fail_rate = round(failed_tools / total_tool_calls, 4) if total_tool_calls else None
+
     active = sum(
-        1
-        for r in rows
-        if r.status in ACTIVE_EXECUTION_STATES
-        and r.status not in {AgentExecutionStatus.QUEUED, AgentExecutionStatus.WAITING_FOR_APPROVAL}
+        cnt
+        for st, cnt in counts_by_status.items()
+        if st in ACTIVE_EXECUTION_STATES
+        and st not in {AgentExecutionStatus.QUEUED, AgentExecutionStatus.WAITING_FOR_APPROVAL}
     )
-    queued = sum(1 for r in rows if r.status == AgentExecutionStatus.QUEUED)
-    waiting = sum(1 for r in rows if r.status == AgentExecutionStatus.WAITING_FOR_APPROVAL)
-    paused = sum(1 for r in rows if r.status == AgentExecutionStatus.PAUSED)
-    failed = sum(
-        1
-        for r in rows
-        if r.status in {AgentExecutionStatus.FAILED, AgentExecutionStatus.TIMED_OUT, AgentExecutionStatus.INTERRUPTED}
-    )
-    completed = sum(1 for r in rows if r.status == AgentExecutionStatus.COMPLETED)
-    durations = [r.duration_ms for r in rows if r.duration_ms is not None]
-    avg_dur = round(sum(durations) / len(durations), 1) if durations else None
-    failed_tools = sum(
-        1 for tc in tool_calls if tc.status in {AgentToolCallStatus.FAILED, AgentToolCallStatus.TIMED_OUT}
-    )
-    tool_fail_rate = round(failed_tools / len(tool_calls), 4) if tool_calls else None
     return AgentExecutionOverviewOut(
-        total_executions=len(rows),
+        total_executions=total_execs,
         active_executions=active,
-        queued_executions=queued,
-        waiting_for_approval=waiting,
-        paused_executions=paused,
-        failed_executions=failed,
-        completed_executions=completed,
+        queued_executions=counts_by_status.get(AgentExecutionStatus.QUEUED, 0),
+        waiting_for_approval=counts_by_status.get(AgentExecutionStatus.WAITING_FOR_APPROVAL, 0),
+        paused_executions=counts_by_status.get(AgentExecutionStatus.PAUSED, 0),
+        failed_executions=(
+            counts_by_status.get(AgentExecutionStatus.FAILED, 0)
+            + counts_by_status.get(AgentExecutionStatus.TIMED_OUT, 0)
+            + counts_by_status.get(AgentExecutionStatus.INTERRUPTED, 0)
+        ),
+        completed_executions=counts_by_status.get(AgentExecutionStatus.COMPLETED, 0),
         average_duration_ms=avg_dur,
         tool_failure_rate=tool_fail_rate,
-        total_tool_calls=len(tool_calls),
+        total_tool_calls=total_tool_calls,
         failed_tool_calls=failed_tools,
     )
 

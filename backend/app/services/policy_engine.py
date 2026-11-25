@@ -162,6 +162,8 @@ ALWAYS_CATEGORY_C_ACTIONS = frozenset(
         "flagsmith.archive_flag",
         "flagsmith.delete_or_archive_flag",
         "flagsmith_delete_or_archive_flag",
+        "promote_experiment_winner",
+        "experiment_promote_winner",
     }
 )
 
@@ -191,6 +193,8 @@ ENV_SCOPED_MUTATIONS = frozenset(
         "activate_experiment",
         "experiment.stop",
         "stop_or_conclude_experiment",
+        "release.rollout_approve",
+        "release_rollout_approve",
     }
 )
 

@@ -85,6 +85,8 @@ export class ApiError extends Error {
   code: string;
   details: Record<string, unknown> | null;
   requestId: string | null;
+  retryable: boolean;
+  timestamp: string | null;
 
   constructor(params: {
     status: number;
@@ -92,6 +94,8 @@ export class ApiError extends Error {
     message: string;
     details?: Record<string, unknown> | null;
     requestId?: string | null;
+    retryable?: boolean;
+    timestamp?: string | null;
   }) {
     super(params.message);
     this.name = "ApiError";
@@ -99,6 +103,10 @@ export class ApiError extends Error {
     this.code = params.code;
     this.details = params.details ?? null;
     this.requestId = params.requestId ?? null;
+    this.retryable =
+      params.retryable ??
+      ([0, 408, 429, 502, 503, 504].includes(params.status));
+    this.timestamp = params.timestamp ?? null;
   }
 }
 
@@ -141,7 +149,8 @@ export function setStoredAuthToken(token: string | null): void {
 
 async function requestJson<T>(
   path: string,
-  init: RequestInit = {}
+  init: RequestInit = {},
+  timeoutMs = 30000
 ): Promise<{ status: number; data: T }> {
   const url = `${API_BASE_URL}${path.startsWith("/") ? path : `/${path}`}`;
   const headers = new Headers(init.headers);
@@ -153,15 +162,37 @@ async function requestJson<T>(
     headers.set("Authorization", `Bearer ${storedTok}`);
   }
 
+  const controller = new AbortController();
+  const externalSignal = init.signal;
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      controller.abort(externalSignal.reason);
+    } else {
+      externalSignal.addEventListener("abort", () => controller.abort(externalSignal.reason), {
+        once: true,
+      });
+    }
+  }
+  const timer = setTimeout(() => controller.abort("timeout"), timeoutMs);
+
   let res: Response;
   try {
     res = await fetch(url, {
       ...init,
       headers,
+      signal: controller.signal,
       credentials: "include",
       cache: "no-store",
     });
   } catch (networkErr) {
+    if (controller.signal.aborted && controller.signal.reason === "timeout") {
+      throw new ApiError({
+        status: 408,
+        code: "REQUEST_TIMEOUT",
+        message: `Request to ReleaseGuard API timed out after ${Math.round(timeoutMs / 1000)}s.`,
+        retryable: true,
+      });
+    }
     throw new ApiError({
       status: 0,
       code: "BACKEND_UNREACHABLE",
@@ -169,7 +200,10 @@ async function requestJson<T>(
         networkErr instanceof Error
           ? `Cannot reach ReleaseGuard API (${API_BASE_URL}): ${networkErr.message}`
           : `Cannot reach ReleaseGuard API (${API_BASE_URL})`,
+      retryable: true,
     });
+  } finally {
+    clearTimeout(timer);
   }
 
   const text = await res.text();
@@ -194,6 +228,9 @@ async function requestJson<T>(
         message: String(errObj?.message || res.statusText || "Request failed"),
         details: (errObj?.details as Record<string, unknown>) ?? null,
         requestId: errObj?.request_id ? String(errObj.request_id) : null,
+        retryable:
+          typeof errObj?.retryable === "boolean" ? errObj.retryable : undefined,
+        timestamp: errObj?.timestamp ? String(errObj.timestamp) : null,
       });
     }
     if (parsed && typeof parsed === "object" && "detail" in parsed) {

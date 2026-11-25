@@ -85,6 +85,10 @@ def create_async_engine_from_settings(
         engine_kwargs["connect_args"] = {"check_same_thread": False}
     else:
         engine_kwargs["pool_pre_ping"] = True
+        engine_kwargs["pool_size"] = 20
+        engine_kwargs["max_overflow"] = 30
+        engine_kwargs["pool_timeout"] = 15
+        engine_kwargs["pool_recycle"] = 1800
 
     engine = create_async_engine(url, **engine_kwargs)
 

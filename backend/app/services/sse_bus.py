@@ -39,6 +39,10 @@ class SSEBus:
         self._subscribers: dict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
         self._seq_counters: dict[str, int] = defaultdict(int)
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._ws_subscribers: set[asyncio.Queue[dict[str, Any]]] = set()
+        self._ws_history: list[dict[str, Any]] = []
+        self._ws_seq: int = 0
+        self._ws_lock: asyncio.Lock = asyncio.Lock()
 
     async def publish(
         self,
@@ -159,11 +163,13 @@ class SSEBus:
             self._subscribers[task_key].discard(queue)
             if not self._subscribers[task_key]:
                 self._subscribers.pop(task_key, None)
+                lock = self._locks.get(task_key)
+                if lock is not None and not lock.locked():
+                    self._locks.pop(task_key, None)
+                    self._seq_counters.pop(task_key, None)
 
     def _ws_state(self) -> tuple[set[asyncio.Queue[dict[str, Any]]], list[dict[str, Any]]]:
-        subs = self.__dict__.setdefault("_ws_subscribers", set())
-        hist = self.__dict__.setdefault("_ws_history", [])
-        return subs, hist
+        return self._ws_subscribers, self._ws_history
 
     async def publish_workspace_event(
         self,
@@ -171,24 +177,27 @@ class SSEBus:
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Broadcast a workspace-wide operational event with ring-buffer replay support."""
-        subs, hist = self._ws_state()
-        seq = int(self.__dict__.get("_ws_seq", 0)) + 1
-        self.__dict__["_ws_seq"] = seq
-        event = {
-            "seq": seq,
-            "event_type": event_type,
-            "timestamp": utcnow().isoformat(),
-            "payload": payload or {},
-        }
-        hist.append(event)
-        if len(hist) > 250:
-            del hist[: len(hist) - 250]
+        async with self._ws_lock:
+            subs, hist = self._ws_state()
+            self._ws_seq += 1
+            seq = self._ws_seq
+            event = {
+                "seq": seq,
+                "event_type": event_type,
+                "timestamp": utcnow().isoformat(),
+                "payload": redact_dict(payload or {}),
+            }
+            hist.append(event)
+            if len(hist) > 250:
+                del hist[: len(hist) - 250]
+            active_subs = list(subs)
 
-        for q in list(subs):
+        for q in active_subs:
             if q.full():
                 with contextlib.suppress(asyncio.QueueEmpty):
                     q.get_nowait()
-            q.put_nowait(event)
+            with contextlib.suppress(asyncio.QueueFull):
+                q.put_nowait(event)
         return event
 
     async def subscribe_workspace(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 from typing import Any
 
@@ -50,6 +51,8 @@ from app.schemas.tools import (
     StopOrConcludeExperimentOutput,
 )
 from app.services.policy_engine import PolicyEngine
+
+logger = logging.getLogger("releaseguard.experiment_tools")
 
 
 def build_variation_map(exp: Experiment) -> dict[str, str]:
@@ -255,8 +258,16 @@ async def handle_activate_experiment(
                             if native_exp.get("id") is not None:
                                 exp.flagsmith_experiment_id = str(native_exp["id"])
                                 await client.start_experiment(env_key, exp.flagsmith_experiment_id)
-                    except (FlagsmithAPIError, KeyError, TypeError, ValueError):
-                        pass
+                    except (FlagsmithAPIError, KeyError, TypeError, ValueError) as exc:
+                        logger.warning(
+                            "Flagsmith native experiment sync failed for exp=%s flag=%s: %s",
+                            exp.id,
+                            flag.key,
+                            exc,
+                        )
+                        exp.recommendation_rationale = (
+                            f"Flagsmith native experiment sync skipped ({exc}); using Flagsmith flag split."
+                        )
 
                 if flag.flag_type == FlagType.MULTIVARIATE:
                     await client.configure_multivariate_split(

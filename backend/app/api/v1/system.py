@@ -8,6 +8,7 @@ from typing import Annotated, Any, Literal
 
 import httpx
 from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -77,6 +78,34 @@ async def _integration_flags(session: AsyncSession) -> tuple[bool, bool]:
         cfg.FLAGSMITH_ORG_TOKEN.strip()
     )
     return github_connected, flagsmith_connected
+
+
+@system_router.get("/health/live")
+async def get_liveness() -> dict[str, Any]:
+    """Process liveness probe (zero DB/external dependencies)."""
+    return {"status": "alive", "timestamp": utcnow().isoformat()}
+
+
+@system_router.get("/health/ready")
+async def get_readiness(session: DBSession) -> JSONResponse:
+    """Database readiness probe distinguishing DB unavailability (503) from process liveness."""
+    t0 = time.perf_counter()
+    try:
+        await session.execute(text("SELECT 1"))
+        latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        return JSONResponse(
+            status_code=200,
+            content={"status": "ready", "database": "ok", "latency_ms": latency_ms},
+        )
+    except Exception as exc:  # noqa: BLE001
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "database": "unavailable",
+                "error": type(exc).__name__,
+            },
+        )
 
 
 @system_router.get("/health", response_model=HealthResponse)

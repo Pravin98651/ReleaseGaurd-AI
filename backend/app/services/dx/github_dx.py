@@ -10,6 +10,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import utcnow
@@ -449,9 +450,23 @@ class GitHubWebhookService:
                 "sender": (payload.get("sender") or {}).get("login"),
             },
         )
-        session.add(ev)
-        await session.flush()
-        return ev
+        try:
+            async with session.begin_nested():
+                session.add(ev)
+                await session.flush()
+            return ev
+        except IntegrityError:
+            # Concurrent delivery with the same delivery_id already persisted
+            existing = (
+                await session.execute(
+                    select(GitHubWebhookEvent)
+                    .where(GitHubWebhookEvent.delivery_id == delivery_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+            if existing is not None:
+                return existing
+            raise
 
     @staticmethod
     async def process_event(

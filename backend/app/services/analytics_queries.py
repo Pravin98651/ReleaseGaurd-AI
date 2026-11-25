@@ -212,68 +212,103 @@ async def load_scoped_dataset(
     session: AsyncSession,
     flt: FilterWindowMeta,
 ) -> dict[str, Any]:
-    """Load ORM entities cleanly once so Dashboard and Metrics reuse a single query pass."""
-    repos = list((await session.execute(select(Repository))).scalars().all())
-    prs = list((await session.execute(select(PullRequest))).scalars().all())
-    changes = list((await session.execute(select(CodeChange))).scalars().all())
-    flags = list((await session.execute(select(FeatureFlag).where(FeatureFlag.is_archived.is_(False)))).scalars().all())
-    rollouts = list((await session.execute(select(RolloutHistory).order_by(RolloutHistory.created_at.desc()))).scalars().all())
-    experiments = list((await session.execute(select(Experiment).order_by(Experiment.updated_at.desc()))).scalars().all())
-    events = list((await session.execute(select(ExperimentEvent).order_by(ExperimentEvent.occurred_at.asc()))).scalars().all())
-    tasks = list((await session.execute(select(AgentTask).order_by(AgentTask.created_at.desc()))).scalars().all())
-    approvals = list((await session.execute(select(Approval).order_by(Approval.created_at.desc()))).scalars().all())
-    audits = list((await session.execute(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(300))).scalars().all())
-    integrations = list((await session.execute(select(IntegrationConnection))).scalars().all())
-
-    # Apply resource filters consistently
+    """Load SQL-filtered & bounded ORM entities cleanly for Dashboard and Metrics."""
+    repo_stmt = select(Repository)
+    pr_stmt = select(PullRequest).order_by(PullRequest.created_at.desc())
+    change_stmt = select(CodeChange).order_by(CodeChange.created_at.desc())
+    flag_stmt = select(FeatureFlag).where(FeatureFlag.is_archived.is_(False))
     if flt.repository_id is not None:
-        repos = [r for r in repos if r.id == flt.repository_id]
-        prs = [p for p in prs if p.repository_id == flt.repository_id]
-        changes = [c for c in changes if c.repository_id == flt.repository_id]
-        flags = [f for f in flags if f.repository_id == flt.repository_id]
-
+        repo_stmt = repo_stmt.where(Repository.id == flt.repository_id)
+        pr_stmt = pr_stmt.where(PullRequest.repository_id == flt.repository_id)
+        change_stmt = change_stmt.where(CodeChange.repository_id == flt.repository_id)
+        flag_stmt = flag_stmt.where(FeatureFlag.repository_id == flt.repository_id)
     if flt.flag_key is not None:
-        flags = [f for f in flags if f.key == flt.flag_key]
-        changes = [c for c in changes if c.flag_key == flt.flag_key]
+        flag_stmt = flag_stmt.where(FeatureFlag.key == flt.flag_key)
+        change_stmt = change_stmt.where(CodeChange.flag_key == flt.flag_key)
+
+    repos = list((await session.execute(repo_stmt.limit(500))).scalars().all())
+    prs = list((await session.execute(pr_stmt.limit(1000))).scalars().all())
+    changes = list((await session.execute(change_stmt.limit(1000))).scalars().all())
+    flags = list((await session.execute(flag_stmt.limit(1000))).scalars().all())
 
     flag_ids = {f.id for f in flags}
+    rollout_stmt = select(RolloutHistory).order_by(RolloutHistory.created_at.desc())
+    exp_stmt = select(Experiment).order_by(Experiment.updated_at.desc())
+    app_stmt = select(Approval).order_by(Approval.created_at.desc())
     if flt.flag_key is not None or flt.repository_id is not None:
-        rollouts = [r for r in rollouts if r.feature_flag_id in flag_ids]
-        experiments = [e for e in experiments if e.feature_flag_id in flag_ids]
-
+        if flag_ids:
+            rollout_stmt = rollout_stmt.where(RolloutHistory.feature_flag_id.in_(flag_ids))
+            exp_stmt = exp_stmt.where(Experiment.feature_flag_id.in_(flag_ids))
+        else:
+            rollout_stmt = rollout_stmt.where(RolloutHistory.id.is_(None))
+            exp_stmt = exp_stmt.where(Experiment.id.is_(None))
     if flt.experiment_id is not None:
-        experiments = [e for e in experiments if e.id == flt.experiment_id]
-
+        exp_stmt = exp_stmt.where(Experiment.id == flt.experiment_id)
     if flt.environment is not None:
-        rollouts = [r for r in rollouts if r.environment_name.lower() == flt.environment]
-        experiments = [e for e in experiments if e.environment_name.lower() == flt.environment]
-        approvals = [
-            a for a in approvals
-            if a.environment_name and a.environment_name.lower() == flt.environment
-        ]
+        rollout_stmt = rollout_stmt.where(RolloutHistory.environment_name == flt.environment)
+        exp_stmt = exp_stmt.where(Experiment.environment_name == flt.environment)
+        app_stmt = app_stmt.where(Approval.environment_name == flt.environment)
 
-    # Filter events by flag/env/source
-    flag_key_set = {f.key for f in flags}
+    rollouts = list((await session.execute(rollout_stmt.limit(2000))).scalars().all())
+    experiments = list((await session.execute(exp_stmt.limit(500))).scalars().all())
+
+    # Push time-window (covering prior trend window) and filters into PostgreSQL for events
+    span = flt.end_at - flt.start_at
+    lookback_start = flt.start_at - span
+    ev_stmt = select(ExperimentEvent).where(
+        ExperimentEvent.occurred_at >= lookback_start,
+        ExperimentEvent.occurred_at <= flt.end_at,
+    )
+    if flt.flag_key is not None or flt.repository_id is not None:
+        flag_key_set = {f.key for f in flags}
+        if flag_key_set:
+            ev_stmt = ev_stmt.where(ExperimentEvent.flag_key.in_(flag_key_set))
+        else:
+            ev_stmt = ev_stmt.where(ExperimentEvent.id.is_(None))
+    if flt.environment is not None:
+        ev_stmt = ev_stmt.where(ExperimentEvent.environment_name == flt.environment)
+    if flt.experiment_id is not None:
+        ev_stmt = ev_stmt.where(ExperimentEvent.experiment_id == flt.experiment_id)
+
+    events = list(
+        reversed(
+            (
+                await session.execute(
+                    ev_stmt.order_by(ExperimentEvent.occurred_at.desc()).limit(25000)
+                )
+            )
+            .scalars()
+            .all()
+        )
+    )
+    tasks = list(
+        (await session.execute(select(AgentTask).order_by(AgentTask.created_at.desc()).limit(1000)))
+        .scalars()
+        .all()
+    )
+    approvals = list((await session.execute(app_stmt.limit(1000))).scalars().all())
+    audits = list(
+        (await session.execute(select(AuditLog).order_by(AuditLog.created_at.desc()).limit(300)))
+        .scalars()
+        .all()
+    )
+    integrations = list((await session.execute(select(IntegrationConnection).limit(100))).scalars().all())
+
+    # Preserve simulator vs interactive telemetry filter cleanly
     filtered_events: list[ExperimentEvent] = []
     for ev in events:
-        if (flt.flag_key is not None or flt.repository_id is not None) and ev.flag_key not in flag_key_set:
-            continue
-        if flt.environment is not None and ev.environment_name.lower() != flt.environment:
-            continue
-        if flt.experiment_id is not None and ev.experiment_id != flt.experiment_id:
-            continue
         if flt.event_source == "simulator_generated" and not is_simulator_event(ev):
             continue
         if flt.event_source == "application_telemetry" and is_simulator_event(ev):
             continue
         filtered_events.append(ev)
 
-    lc_stmt = select(Release)
+    lc_stmt = select(Release).order_by(Release.created_at.desc())
     if flt.environment:
         lc_stmt = lc_stmt.where(Release.target_environment == flt.environment)
     if flt.repository_id:
         lc_stmt = lc_stmt.where(Release.repository_id == flt.repository_id)
-    lifecycle_releases = list((await session.execute(lc_stmt)).scalars().all())
+    lifecycle_releases = list((await session.execute(lc_stmt.limit(500))).scalars().all())
 
     return {
         "repos": repos,
