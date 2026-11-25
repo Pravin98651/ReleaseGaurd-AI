@@ -208,6 +208,7 @@ class PullRequestDetailOut(PullRequestOut):
 
     code_changes: list[CodeChangeOut] = Field(default_factory=list)
     diff_summary: dict[str, Any] = Field(default_factory=dict)
+    changed_files: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PullRequestAnalyzeResponse(BaseModel):

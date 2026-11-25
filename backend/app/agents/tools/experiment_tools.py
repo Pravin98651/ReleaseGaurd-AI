@@ -7,6 +7,7 @@ from typing import Any
 
 from sqlalchemy import or_, select
 
+from app.agents.specialists.experiment_agent import canonicalize_primary_metric
 from app.agents.tools.context import ToolExecutionContext
 from app.analytics.bayesian import analyze_experiment_events
 from app.analytics.incidents import investigate_incident
@@ -153,7 +154,7 @@ async def handle_create_experiment_plan(
         control_variation=args.control_variation,
         treatment_variation=args.treatment_variation,
         traffic_allocation=dict(args.traffic_allocation),
-        primary_metric=args.primary_metric,
+        primary_metric=canonicalize_primary_metric(args.primary_metric),
         guardrail_metrics=list(args.guardrail_metrics),
         guardrail_thresholds=thresholds,
     )
@@ -179,42 +180,46 @@ async def handle_activate_experiment(
     if flag is None:
         raise ValueError(f"FeatureFlag {exp.feature_flag_id} for experiment not found.")
 
-    # Apply configured split in Flagsmith when integration is connected
-    try:
-        client = await ctx.get_flagsmith_client()
-        env_key = exp.environment_key or await ctx.resolve_env_key(
-            exp.environment_name, flag=flag, project_id=flag.flagsmith_project_id
-        )
-        exp.environment_key = env_key
-        if flag.flagsmith_feature_id is not None:
-            alloc = dict(exp.traffic_allocation or {"control": 50, "treatment": 50})
-            if flag.flag_type == FlagType.MULTIVARIATE:
-                await client.configure_multivariate_split(
-                    project_id=flag.flagsmith_project_id,
-                    env_key=env_key,
-                    feature_id=int(flag.flagsmith_feature_id),
-                    flag_key=flag.key,
-                    allocations=alloc,
-                    verify_edge=ctx.verify_edge_on_mutation,
-                )
-            else:
-                trt_pct = int(
-                    alloc.get(exp.treatment_variation, alloc.get("treatment", 50))
-                )
-                await client.set_gradual_rollout_stage(
-                    project_id=flag.flagsmith_project_id,
-                    env_key=env_key,
-                    feature_id=int(flag.flagsmith_feature_id),
-                    flag_key=flag.key,
-                    target_percentage=trt_pct,
-                    strategy="percentage_split_segment",
-                    verify_edge=ctx.verify_edge_on_mutation,
-                )
-            await ctx.sync_flag_from_flagsmith(flag.key, project_id=flag.flagsmith_project_id)
-    except ValueError:
-        # Allow DB activation if running without Flagsmith connection in pure DB scenarios
-        if ctx.flagsmith_client is not None:
-            raise
+    # Apply configured split in Flagsmith when connected or linked to a Flagsmith feature
+    has_flagsmith_conn = (
+        ctx.flagsmith_client is not None or (await ctx.get_flagsmith_connection()) is not None
+    )
+    if flag.flagsmith_feature_id is not None or has_flagsmith_conn:
+        try:
+            client = await ctx.get_flagsmith_client()
+            env_key = exp.environment_key or await ctx.resolve_env_key(
+                exp.environment_name, flag=flag, project_id=flag.flagsmith_project_id
+            )
+            exp.environment_key = env_key
+            if flag.flagsmith_feature_id is not None:
+                alloc = dict(exp.traffic_allocation or {"control": 50, "treatment": 50})
+                if flag.flag_type == FlagType.MULTIVARIATE:
+                    await client.configure_multivariate_split(
+                        project_id=flag.flagsmith_project_id,
+                        env_key=env_key,
+                        feature_id=int(flag.flagsmith_feature_id),
+                        flag_key=flag.key,
+                        allocations=alloc,
+                        verify_edge=ctx.verify_edge_on_mutation,
+                    )
+                else:
+                    trt_pct = int(
+                        alloc.get(exp.treatment_variation, alloc.get("treatment", 50))
+                    )
+                    await client.set_gradual_rollout_stage(
+                        project_id=flag.flagsmith_project_id,
+                        env_key=env_key,
+                        feature_id=int(flag.flagsmith_feature_id),
+                        flag_key=flag.key,
+                        target_percentage=trt_pct,
+                        strategy="percentage_split_segment",
+                        verify_edge=ctx.verify_edge_on_mutation,
+                    )
+                await ctx.sync_flag_from_flagsmith(flag.key, project_id=flag.flagsmith_project_id)
+        except ValueError:
+            # Allow DB-only activation strictly in offline scenarios with no linked Flagsmith feature
+            if ctx.flagsmith_client is not None or flag.flagsmith_feature_id is not None:
+                raise
 
     exp.status = ExperimentStatus.RUNNING
     exp.started_at = exp.started_at or utcnow()
@@ -237,22 +242,18 @@ async def handle_stop_or_conclude_experiment(
     flag = await ctx.session.get(FeatureFlag, exp.feature_flag_id)
 
     if args.outcome == "rolled_back" and flag is not None and flag.flagsmith_feature_id is not None:
-        try:
-            client = await ctx.get_flagsmith_client()
-            env_key = exp.environment_key or await ctx.resolve_env_key(
-                exp.environment_name, flag=flag, project_id=flag.flagsmith_project_id
-            )
-            await client.rollback_flag(
-                project_id=flag.flagsmith_project_id,
-                env_key=env_key,
-                feature_id=int(flag.flagsmith_feature_id),
-                flag_key=flag.key,
-                verify_edge=ctx.verify_edge_on_mutation,
-            )
-            await ctx.sync_flag_from_flagsmith(flag.key, project_id=flag.flagsmith_project_id)
-        except ValueError:
-            if ctx.flagsmith_client is not None:
-                raise
+        client = await ctx.get_flagsmith_client()
+        env_key = exp.environment_key or await ctx.resolve_env_key(
+            exp.environment_name, flag=flag, project_id=flag.flagsmith_project_id
+        )
+        await client.rollback_flag(
+            project_id=flag.flagsmith_project_id,
+            env_key=env_key,
+            feature_id=int(flag.flagsmith_feature_id),
+            flag_key=flag.key,
+            verify_edge=ctx.verify_edge_on_mutation,
+        )
+        await ctx.sync_flag_from_flagsmith(flag.key, project_id=flag.flagsmith_project_id)
 
     exp.status = ExperimentStatus(args.outcome)
     exp.ended_at = utcnow()

@@ -269,6 +269,8 @@ async def analyze_pr_with_static_and_gemini(
         "potential_risks": baseline["potential_risks"],
         "flag_opportunities": baseline["flag_opportunities"],
         "static_signals": baseline["static_signals"],
+        "analysis_mode": "static_only",
+        "gemini_error": None,
     }
 
     if gemini_client is not None and gemini_client.is_configured:
@@ -281,31 +283,45 @@ async def analyze_pr_with_static_and_gemini(
 
         meta = {"repo": repo_full_name, "pr_number": pr_number}
         prompt = (
-            "Analyze the following sandboxed Pull Request metadata and unified diff.\n"
-            "Return STRICT JSON with keys: summary (str), risk_score (int 0..100), "
-            "risk_level ('low'|'medium'|'high'|'critical'), confirmed_risks (list of "
+            "Analyze the following sandboxed Pull Request metadata and unified diff across:\n"
+            "1) PR objective and modified functionality\n"
+            "2) Affected files, downstream components, and dependencies\n"
+            "3) API, database/migration, and security-sensitive changes\n"
+            "4) Backward compatibility, performance implications, release risks, and remediation\n"
+            "5) Feature flag wrapping opportunities.\n"
+            "Return STRICT JSON with keys: summary (str covering objective, modified functionality, "
+            "dependencies/API/DB/security impact, backward compatibility, and performance), "
+            "risk_score (int 0..100), risk_level ('low'|'medium'|'high'|'critical'), confirmed_risks (list of "
             "{title, severity, file_path, line_range, evidence, mitigation}), "
             "potential_risks (list of {title, severity, assumption, verification_needed}), "
             "flag_opportunities (list of {suggested_flag_key, flag_type, target_files, rationale, recommended_rollout}).\n"
+            "CRITICAL: Only place findings with direct file_path + code evidence from the diff into confirmed_risks; "
+            "place assumptions or unverified hypotheses in potential_risks.\n"
             f"Deterministic static signals already observed: {json.dumps(baseline['static_signals'])}\n\n"
             f"{wrap_untrusted('github_pr_title', meta, pr_title, max_chars=2000)}\n"
             f"{wrap_untrusted('github_pr_body', meta, pr_body or '', max_chars=8000)}\n"
             f"{wrap_untrusted('github_pr_diff', meta, raw_diff)}"
         )
-        resp = await gemini_client.generate_content(
-            contents=[{"role": "user", "parts": [{"text": prompt}]}],
-            system_instruction=PR_AGENT_SYSTEM_PROMPT,
-            temperature=0.1,
-            response_mime_type="application/json",
-        )
-        raw_text = getattr(resp, "text", None) or ""
-        if not raw_text and getattr(resp, "candidates", None):
-            parts = getattr(resp.candidates[0].content, "parts", []) or []
-            raw_text = "".join(str(getattr(p, "text", "") or "") for p in parts)
+        try:
+            resp = await gemini_client.generate_content(
+                contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                system_instruction=PR_AGENT_SYSTEM_PROMPT,
+                temperature=0.1,
+                response_mime_type="application/json",
+            )
+            raw_text = getattr(resp, "text", None) or ""
+            if not raw_text and getattr(resp, "candidates", None):
+                parts = getattr(resp.candidates[0].content, "parts", []) or []
+                raw_text = "".join(str(getattr(p, "text", "") or "") for p in parts)
 
-        if raw_text:
-            try:
-                parsed = json.loads(raw_text)
+            cleaned_json = raw_text.strip()
+            if cleaned_json.startswith("```"):
+                cleaned_json = re.sub(
+                    r"^```(?:json)?\s*|\s*```$", "", cleaned_json, flags=re.DOTALL
+                ).strip()
+
+            if cleaned_json:
+                parsed = json.loads(cleaned_json)
                 if isinstance(parsed, dict):
                     verified_confirmed: list[dict[str, Any]] = []
                     extra_potential: list[dict[str, Any]] = list(parsed.get("potential_risks") or [])
@@ -338,9 +354,16 @@ async def analyze_pr_with_static_and_gemini(
                         result["potential_risks"] = extra_potential
                     if parsed.get("flag_opportunities"):
                         result["flag_opportunities"] = list(parsed["flag_opportunities"])
-            except json.JSONDecodeError:
-                # Keep deterministic baseline if Gemini returns non-JSON text
-                pass
+                    result["analysis_mode"] = "gemini_ai"
+        except Exception as exc:  # noqa: BLE001
+            from app.core.security import scrub_secrets
+
+            err_msg = scrub_secrets(str(exc))[:240] or type(exc).__name__
+            result["analysis_mode"] = "static_fallback"
+            result["gemini_error"] = err_msg
+            result["analysis_summary"] = (
+                f"{result['analysis_summary']} [Static Fallback — Gemini unavailable: {err_msg}]"
+            )
 
     return result
 
@@ -353,6 +376,23 @@ def _unified_diff(path: str, before_code: str, after_code: str) -> str:
             fromfile=f"a/{path}",
             tofile=f"b/{path}",
         )
+    )
+
+
+def _build_python_import_block(primary_file: str, symbol: str) -> str:
+    """Return valid Python import lines even when directory names contain hyphens (e.g. demo-app)."""
+    module_parts = primary_file[:-3].split("/")
+    if all(part.isidentifier() for part in module_parts):
+        return f"from {'.'.join(module_parts)} import {symbol}"
+    return (
+        "import importlib.util\n"
+        "from pathlib import Path\n\n"
+        f"_MOD_PATH = Path(__file__).resolve().parents[1] / {primary_file!r}\n"
+        '_SPEC = importlib.util.spec_from_file_location("_rg_target_mod", _MOD_PATH)\n'
+        "_MOD = importlib.util.module_from_spec(_SPEC)\n"
+        "assert _SPEC is not None and _SPEC.loader is not None\n"
+        "_SPEC.loader.exec_module(_MOD)\n"
+        f"{symbol} = _MOD.{symbol}"
     )
 
 
@@ -420,16 +460,17 @@ def generate_flag_patch_payload(
                 "        return False\n"
             )
 
-    module_import = primary_file[:-3].replace("/", ".")
     fn_name = (
         f"resolve_{safe_key}_variant"
         if flag_type == FlagType.MULTIVARIATE
         else f"is_{safe_key}_enabled"
     )
+    import_block = _build_python_import_block(primary_file, fn_name)
+    fn_name_resolved = fn_name
     if flag_type == FlagType.MULTIVARIATE:
         test_content = (
             f'"""Isolated tests for `{flag_key}` Flagsmith multivariate wrapper."""\n\n'
-            f"from {module_import} import {fn_name}\n\n\n"
+            f"{import_block}\n\n\n"
             "class _FakeFlags:\n"
             "    def __init__(self, enabled: bool, value: str) -> None:\n"
             "        self._enabled = enabled\n"
@@ -444,13 +485,13 @@ def generate_flag_patch_payload(
             "    def get_identity_flags(self, identifier: str) -> _FakeFlags:\n"
             "        return self._flags\n\n\n"
             f"def test_{safe_key}_variant_routing() -> None:\n"
-            f'    assert {fn_name}(_FakeClient(True, "v2"), "u1") == "v2"\n'
-            f'    assert {fn_name}(_FakeClient(False, "v2"), "u1") == "v1"\n'
+            f'    assert {fn_name_resolved}(_FakeClient(True, "v2"), "u1") == "v2"\n'
+            f'    assert {fn_name_resolved}(_FakeClient(False, "v2"), "u1") == "v1"\n'
         )
     else:
         test_content = (
             f'"""Isolated tests for `{flag_key}` Flagsmith boolean wrapper."""\n\n'
-            f"from {module_import} import {fn_name}\n\n\n"
+            f"{import_block}\n\n\n"
             "class _FakeFlags:\n"
             "    def __init__(self, enabled: bool) -> None:\n"
             "        self._enabled = enabled\n\n"
@@ -493,7 +534,213 @@ def generate_flag_patch_payload(
         ),
         "files_diff": files_diff,
         "generated_tests": generated_tests,
+        "generation_mode": "template_fallback",
     }
+
+
+def _is_safe_relative_patch_path(raw_path: str) -> bool:
+    """Validate relative repository file path before accepting an AI-proposed patch."""
+    clean = raw_path.strip()
+    if not clean or "\\" in clean or clean.startswith("/") or "\x00" in clean:
+        return False
+    parts = clean.split("/")
+    if any(p in ("", ".", "..", ".git") or p.startswith(".env") for p in parts):
+        return False
+    return not re.match(r"^[A-Za-z]:", clean)
+
+
+def _passes_basic_syntax(file_path: str, content: str) -> bool:
+    if not content.strip():
+        return False
+    if file_path.endswith(".py"):
+        try:
+            ast.parse(content)
+        except SyntaxError:
+            return False
+    return True
+
+
+async def generate_context_aware_flag_patch(
+    *,
+    flag_key: str,
+    flag_type: FlagType,
+    target_files: list[str],
+    base_files: dict[str, str] | None = None,
+    files_data: list[dict[str, Any]] | None = None,
+    pr_title: str = "",
+    pr_body: str | None = None,
+    repo_full_name: str = "",
+    pr_number: int = 0,
+    gemini_client: GeminiClient | None = None,
+) -> dict[str, Any]:
+    """Use Gemini (with AFC=Disabled) for language-aware Flagsmith wrapping, falling back safely."""
+    fallback_base = dict(base_files or {})
+
+    if gemini_client is not None and gemini_client.is_configured and (
+        fallback_base or files_data or target_files
+    ):
+        context_blobs: list[str] = []
+        for path in target_files[:5]:
+            if path in fallback_base and _is_safe_relative_patch_path(path):
+                context_blobs.append(
+                    wrap_untrusted(
+                        "github_source_file",
+                        {"repo": repo_full_name, "path": path},
+                        fallback_base[path],
+                        max_chars=12000,
+                    )
+                )
+        for path, code in list(fallback_base.items())[:3]:
+            if path not in target_files and _is_safe_relative_patch_path(path):
+                context_blobs.append(
+                    wrap_untrusted(
+                        "github_source_file",
+                        {"repo": repo_full_name, "path": path},
+                        code,
+                        max_chars=8000,
+                    )
+                )
+
+        diff_sections = []
+        for item in (files_data or [])[:6]:
+            fn = str(item.get("filename") or "")
+            patch = str(item.get("patch") or "")
+            if fn and patch:
+                diff_sections.append(f"--- a/{fn}\n+++ b/{fn}\n{patch}")
+
+        meta = {"repo": repo_full_name, "pr_number": pr_number, "flag_key": flag_key}
+        sdk_guidance = (
+            "Python: use `flagsmith_client.get_identity_flags(identifier=...)` with `is_feature_enabled` / "
+            "`get_feature_value` and catch ONLY `(AttributeError, RuntimeError, ValueError, TypeError, OSError)` "
+            "(NEVER `except Exception:` which fails Ruff BLE001) with safe legacy fallback on disabled/error.\n"
+            "TypeScript/JavaScript/React: use Flagsmith JS SDK (`flagsmith.hasFeature(key)` / `getValue(key)` "
+            "or passed flag evaluation props) preserving legacy UI/handler when disabled or unset."
+        )
+        prompt = (
+            f"Generate a minimal, production-safe Feature Flag patch wrapping `{flag_key}` "
+            f"(type: {flag_type.value}) for target files {json.dumps(target_files)}.\n"
+            f"SDK patterns:\n{sdk_guidance}\n"
+            "Requirements:\n"
+            "- If a target file's existing source is provided, use `action: 'modify'` and return the COMPLETE "
+            "updated file content in `after_code` preserving unrelated logic, types, and imports.\n"
+            "- Only touch safe relative paths matching target_files or new helper/test paths.\n"
+            "- Always preserve legacy behavior when the flag is disabled, missing, or throws.\n"
+            "- Include ruff-clean Python unit tests in `generated_tests` covering enabled, disabled, and error "
+            "fallback. IMPORTANT: `generated_tests` run in an isolated temp dir containing ONLY the files in "
+            "`files_diff` + `generated_tests`, so stub any unavailable third-party/sibling modules with `sys.modules` "
+            "and use relative/file-path loading if directory names have hyphens.\n"
+            "Return STRICT JSON with keys:\n"
+            "  title (str), description (str),\n"
+            "  files_diff (list of {file_path, action ('create'|'modify'), after_code}),\n"
+            "  generated_tests (list of {file_path, content}).\n\n"
+            f"{wrap_untrusted('github_pr_title', meta, pr_title or 'PR Flag Wrap', max_chars=1000)}\n"
+            f"{wrap_untrusted('github_pr_body', meta, pr_body or '', max_chars=3000)}\n"
+            + (
+                f"{wrap_untrusted('github_pr_diff', meta, chr(10).join(diff_sections), max_chars=14000)}\n"
+                if diff_sections
+                else ""
+            )
+            + "\n".join(context_blobs)
+        )
+
+        try:
+            resp = await gemini_client.generate_content(
+                contents=[{"role": "user", "parts": [{"text": prompt}]}],
+                system_instruction=PR_AGENT_SYSTEM_PROMPT,
+                temperature=0.1,
+                response_mime_type="application/json",
+            )
+            raw_text = getattr(resp, "text", None) or ""
+            if not raw_text and getattr(resp, "candidates", None):
+                parts = getattr(resp.candidates[0].content, "parts", []) or []
+                raw_text = "".join(
+                    str(getattr(p, "text", "") or "")
+                    for p in parts
+                    if not bool(getattr(p, "thought", False))
+                )
+
+            cleaned = raw_text.strip()
+            if cleaned.startswith("```"):
+                cleaned = re.sub(
+                    r"^```(?:json)?\s*|\s*```$", "", cleaned, flags=re.DOTALL
+                ).strip()
+
+            parsed = json.loads(cleaned) if cleaned else None
+            if isinstance(parsed, dict) and isinstance(parsed.get("files_diff"), list):
+                allowed_base_paths = set(fallback_base.keys()) | set(target_files)
+                validated_diffs: list[dict[str, Any]] = []
+                for entry in parsed["files_diff"]:
+                    if not isinstance(entry, dict):
+                        continue
+                    fp = str(entry.get("file_path") or "").strip()
+                    after_code = str(entry.get("after_code") or "")
+                    if not _is_safe_relative_patch_path(fp) or not _passes_basic_syntax(fp, after_code):
+                        continue
+                    # Constrain modifications strictly to known paths when target/base files exist
+                    if allowed_base_paths and fp not in allowed_base_paths and fp not in fallback_base:
+                        # Allow new flag helper files created alongside target files
+                        action = "create"
+                        before_code = ""
+                    elif fp in fallback_base:
+                        action = "modify"
+                        before_code = fallback_base[fp]
+                    else:
+                        action = "create" if str(entry.get("action")) != "modify" else "modify"
+                        before_code = str(fallback_base.get(fp, ""))
+
+                    if action == "modify" and after_code == before_code:
+                        continue
+                    validated_diffs.append(
+                        {
+                            "file_path": fp,
+                            "action": action,
+                            "before_code": before_code,
+                            "after_code": after_code,
+                            "unified_diff": _unified_diff(fp, before_code, after_code),
+                        }
+                    )
+
+                validated_tests: list[dict[str, Any]] = []
+                for t_entry in parsed.get("generated_tests") or []:
+                    if not isinstance(t_entry, dict):
+                        continue
+                    tfp = str(t_entry.get("file_path") or "").strip()
+                    tcontent = str(t_entry.get("content") or "")
+                    if _is_safe_relative_patch_path(tfp) and _passes_basic_syntax(tfp, tcontent):
+                        validated_tests.append({"file_path": tfp, "content": tcontent})
+
+                if validated_diffs:
+                    if not validated_tests:
+                        tmpl = generate_flag_patch_payload(
+                            flag_key=flag_key,
+                            flag_type=flag_type,
+                            target_files=target_files,
+                            base_files=fallback_base,
+                        )
+                        validated_tests = tmpl["generated_tests"]
+                    return {
+                        "title": str(
+                            parsed.get("title")
+                            or f"feat(flags): guard change behind Flagsmith `{flag_key}`"
+                        )[:250],
+                        "description": str(
+                            parsed.get("description")
+                            or f"Context-aware Gemini Flagsmith patch wrapping `{flag_key}` with safe fallback."
+                        ),
+                        "files_diff": validated_diffs,
+                        "generated_tests": validated_tests,
+                        "generation_mode": "gemini_context_aware",
+                    }
+        except (ValueError, RuntimeError, TypeError):
+            # Safely fall back to deterministic template if Gemini call fails or emits unusable output
+            pass
+
+    return generate_flag_patch_payload(
+        flag_key=flag_key,
+        flag_type=flag_type,
+        target_files=target_files,
+        base_files=fallback_base,
+    )
 
 
 def generate_cleanup_patch_payload(
@@ -519,12 +766,11 @@ def generate_cleanup_patch_payload(
         f'    """Flag `{flag_key}` permanently resolved to {keep_branch}."""\n'
         "    return PERMANENT_BEHAVIOR_ENABLED\n"
     )
-    module_import = target_path[:-3].replace("/", ".")
+    import_block = _build_python_import_block(target_path, f"is_{safe_key}_active")
     test_content = (
         f'"""Cleanup verification test for retired flag `{flag_key}`."""\n\n'
-        f"from {module_import} import PERMANENT_BEHAVIOR_ENABLED, is_{safe_key}_active\n\n\n"
+        f"{import_block}\n\n\n"
         f"def test_{safe_key}_cleanup_resolved() -> None:\n"
-        f"    assert PERMANENT_BEHAVIOR_ENABLED is {keep_enabled!r}\n"
         f"    assert is_{safe_key}_active() is {keep_enabled!r}\n"
     )
 

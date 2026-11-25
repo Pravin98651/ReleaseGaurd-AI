@@ -13,5 +13,6 @@ langgraph
 flagsmith
 cryptography
 python-multipart
+tzdata
 pytest
 ruff

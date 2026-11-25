@@ -51,6 +51,9 @@ class User(Base):
         nullable=False,
         default=UserRole.ADMIN,
     )
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    github_login: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    token_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, default=utcnow, server_default=func.now()

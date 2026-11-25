@@ -10,7 +10,12 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.analytics.flag_health import scan_files_for_flag_references
-from app.api.deps import DBSession, DefaultOperator, build_github_client
+from app.api.deps import (
+    AuthenticatedOperator,
+    DBSession,
+    DefaultOperator,
+    build_github_client,
+)
 from app.api.v1.errors import APIException
 from app.core.database import utcnow
 from app.models import (
@@ -104,6 +109,7 @@ async def _latest_github_connection_id(session: AsyncSession) -> uuid.UUID | Non
 @repositories_router.get("", response_model=PaginatedResponse[RepositoryOut])
 async def list_repositories(
     session: DBSession,
+    _: AuthenticatedOperator,
     limit: Annotated[int, Query(ge=1, le=200)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> PaginatedResponse[RepositoryOut]:
@@ -198,6 +204,7 @@ async def list_repository_branches(
     repo_id: uuid.UUID,
     request: Request,
     session: DBSession,
+    _: AuthenticatedOperator,
 ) -> list[BranchOut]:
     """List live branches for a connected repository from GitHub."""
     repo = await session.get(Repository, repo_id)
@@ -301,20 +308,14 @@ async def scan_repository_flags(
     )
 
 
-@repositories_router.post("/{repo_id}/pull-requests/sync")
-async def sync_repo_pull_requests(
-    repo_id: uuid.UUID,
-    request: Request,
-    session: DBSession,
-    operator: DefaultOperator,
-    state: Annotated[str, Query()] = "open",
-) -> dict[str, Any]:
-    """Fetch pull requests from GitHub and upsert them into `pull_requests`."""
-    repo = await session.get(Repository, repo_id)
-    if repo is None:
-        raise APIException(404, "REPOSITORY_NOT_FOUND", f"Repository {repo_id} not found.")
-
-    gh = await build_github_client(request.app, session)
+async def sync_pull_requests_for_repo(
+    session: AsyncSession,
+    gh: Any,
+    repo: Repository,
+    *,
+    state: str = "open",
+) -> list[PullRequestOut]:
+    """Fetch PRs from GitHub and upsert rows in `pull_requests` cleanly."""
     raw_prs = await gh.list_pull_requests(repo.owner, repo.name, state=state)
     synced: list[PullRequestOut] = []
 
@@ -367,6 +368,25 @@ async def sync_repo_pull_requests(
         synced.append(PullRequestOut.model_validate(pr_row))
 
     repo.last_synced_at = utcnow()
+    return synced
+
+
+@repositories_router.post("/{repo_id}/pull-requests/sync")
+async def sync_repo_pull_requests(
+    repo_id: uuid.UUID,
+    request: Request,
+    session: DBSession,
+    operator: DefaultOperator,
+    state: Annotated[str, Query()] = "open",
+) -> dict[str, Any]:
+    """Fetch pull requests from GitHub and upsert them into `pull_requests`."""
+    repo = await session.get(Repository, repo_id)
+    if repo is None:
+        raise APIException(404, "REPOSITORY_NOT_FOUND", f"Repository {repo_id} not found.")
+
+    gh = await build_github_client(request.app, session)
+    synced = await sync_pull_requests_for_repo(session, gh, repo, state=state)
+
     await PolicyEngine.record_audit_log(
         session,
         actor_type=ActorType.USER,

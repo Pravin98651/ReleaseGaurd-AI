@@ -399,6 +399,39 @@ function PullRequestsInner() {
                 )}
               </SectionCard>
 
+              {/* Changed Files & GitHub Diff */}
+              {selectedPr.changed_files && selectedPr.changed_files.length > 0 && (
+                <SectionCard
+                  title={`Changed Files & Diff (${selectedPr.changed_files.length})`}
+                  subtitle="Live file patches retrieved from GitHub REST API"
+                >
+                  <div className="space-y-3 max-h-[360px] overflow-y-auto">
+                    {selectedPr.changed_files.map((file, idx) => (
+                      <div
+                        key={`${file.filename}-${idx}`}
+                        className="rounded-lg border border-slate-800 bg-[#0d1119] p-3 text-xs space-y-2"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-mono font-semibold text-cyan-300">
+                            {file.filename}
+                          </span>
+                          <div className="flex items-center gap-2 font-mono text-[11px]">
+                            <span className="text-slate-400">{file.status}</span>
+                            <span className="text-emerald-400">+{file.additions}</span>
+                            <span className="text-rose-400">-{file.deletions}</span>
+                          </div>
+                        </div>
+                        {file.patch && (
+                          <pre className="overflow-x-auto rounded bg-[#070a0f] p-2.5 font-mono text-[11px] leading-relaxed text-slate-300">
+                            {file.patch}
+                          </pre>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </SectionCard>
+              )}
+
               {/* Confirmed Risks vs Potential Risks */}
               <div className="grid gap-6 md:grid-cols-2">
                 <SectionCard

@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { getSystemHealth, listApprovals } from "@/lib/api";
-import type { SystemHealth } from "@/types/releaseguard";
+import { getAuthStatus, getSystemHealth, listApprovals } from "@/lib/api";
+import type { AuthStatus, SystemHealth } from "@/types/releaseguard";
 
 export interface ControlPlaneStatus {
   health: SystemHealth | null;
+  authStatus: AuthStatus | null;
   backendReachable: boolean;
   pendingApprovalsCount: number;
   lastCheckedAt: string | null;
@@ -20,17 +21,20 @@ export function triggerControlPlaneRefresh() {
 
 export function useControlPlaneStatus(): ControlPlaneStatus {
   const [health, setHealth] = useState<SystemHealth | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const [backendReachable, setBackendReachable] = useState(false);
   const [pendingApprovalsCount, setPendingApprovalsCount] = useState(0);
   const [lastCheckedAt, setLastCheckedAt] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
-      const [h, approvals] = await Promise.all([
+      const [h, auth, approvals] = await Promise.all([
         getSystemHealth(),
+        getAuthStatus().catch(() => null),
         listApprovals({ status: "pending", limit: 1 }).catch(() => null),
       ]);
       setHealth(h);
+      setAuthStatus(auth);
       setBackendReachable(true);
       if (approvals) {
         setPendingApprovalsCount(approvals.total ?? approvals.items.length);
@@ -39,6 +43,7 @@ export function useControlPlaneStatus(): ControlPlaneStatus {
     } catch {
       setBackendReachable(false);
       setHealth(null);
+      setAuthStatus(null);
       setLastCheckedAt(new Date().toISOString());
     }
   }, []);
@@ -59,16 +64,19 @@ export function useControlPlaneStatus(): ControlPlaneStatus {
       void run();
     };
     window.addEventListener("rg:refresh-status", onCustomRefresh);
+    window.addEventListener("rg:auth-changed", onCustomRefresh);
 
     return () => {
       active = false;
       clearInterval(timer);
       window.removeEventListener("rg:refresh-status", onCustomRefresh);
+      window.removeEventListener("rg:auth-changed", onCustomRefresh);
     };
   }, [refresh]);
 
   return {
     health,
+    authStatus,
     backendReachable,
     pendingApprovalsCount,
     lastCheckedAt,

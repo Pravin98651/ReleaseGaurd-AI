@@ -40,6 +40,7 @@ _SENSITIVE_DICT_KEYS = frozenset(
         "secret_key",
         "encryption_key",
         "password",
+        "password_hash",
         "api_key",
         "gemini_api_key",
         "authorization",
@@ -166,6 +167,87 @@ def verify_ingest_key(provided_key: str | None, expected_key: str | None = None)
     if not provided_key or not expected:
         return False
     return hmac.compare_digest(provided_key.strip(), expected.strip())
+
+
+def hash_password(password: str, *, iterations: int = 120_000) -> str:
+    """Hash a password with PBKDF2-HMAC-SHA256 and a random 16-byte salt."""
+    if not password or len(password) < 4:
+        raise ValueError("Password must be at least 4 characters.")
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    salt_b64 = base64.urlsafe_b64encode(salt).decode("ascii").rstrip("=")
+    dig_b64 = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return f"pbkdf2_sha256${iterations}${salt_b64}${dig_b64}"
+
+
+def verify_password(password: str, stored_hash: str | None) -> bool:
+    """Verify plaintext password against stored PBKDF2-HMAC-SHA256 hash in constant time."""
+    if not password or not stored_hash or "$" not in stored_hash:
+        return False
+    parts = stored_hash.split("$")
+    if len(parts) != 4 or parts[0] != "pbkdf2_sha256":
+        return False
+    try:
+        iterations = int(parts[1])
+        salt = base64.urlsafe_b64decode(parts[2] + "=" * (-len(parts[2]) % 4))
+        expected = base64.urlsafe_b64decode(parts[3] + "=" * (-len(parts[3]) % 4))
+    except Exception:  # noqa: BLE001
+        return False
+    candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return hmac.compare_digest(candidate, expected)
+
+
+def issue_auth_token(
+    *,
+    user_id: str,
+    email: str,
+    role: str,
+    token_version: int = 1,
+    secret_key: str | None = None,
+    ttl_seconds: int | None = None,
+) -> str:
+    """Issue a signed HMAC-SHA256 control-plane session bearer/cookie token."""
+    cfg = get_settings()
+    key = (secret_key if secret_key is not None else cfg.SECRET_KEY).encode("utf-8")
+    now = int(time.time())
+    ttl = ttl_seconds if ttl_seconds is not None else cfg.AUTH_SESSION_TTL_SECONDS
+    body = {
+        "sub": str(user_id),
+        "email": email,
+        "role": role,
+        "ver": int(token_version),
+        "iat": now,
+        "exp": now + ttl,
+        "jti": secrets.token_urlsafe(12),
+    }
+    raw_bytes = json.dumps(body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    b64_payload = base64.urlsafe_b64encode(raw_bytes).decode("ascii").rstrip("=")
+    sig = hmac.new(key, b64_payload.encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{b64_payload}.{sig}"
+
+
+def verify_auth_token(token: str, secret_key: str | None = None) -> dict[str, Any]:
+    """Verify HMAC-SHA256 control-plane session token signature and expiry."""
+    if not token or "." not in token:
+        raise ValueError("Malformed authentication token.")
+    b64_payload, provided_sig = token.split(".", 1)
+    key = (secret_key if secret_key is not None else get_settings().SECRET_KEY).encode("utf-8")
+    expected_sig = hmac.new(key, b64_payload.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(provided_sig, expected_sig):
+        raise ValueError("Invalid authentication token signature.")
+
+    padded = b64_payload + "=" * (-len(b64_payload) % 4)
+    try:
+        decoded = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8"))
+    except Exception as exc:
+        raise ValueError("Corrupted authentication token payload.") from exc
+
+    exp = int(decoded.get("exp", 0))
+    if time.time() > exp:
+        raise ValueError("Authentication session has expired.")
+    if not decoded.get("sub"):
+        raise ValueError("Authentication token missing subject.")
+    return decoded
 
 
 def scrub_secrets(text: str, extra_secrets: list[str] | None = None) -> str:

@@ -480,6 +480,21 @@ class PolicyEngine:
             status=AuditStatus.PENDING,
             details={"action_type": action_type, "expires_at": expires_at.isoformat()},
         )
+        from app.models import NotificationCategory
+        from app.services.notification_service import create_notification
+
+        await create_notification(
+            session,
+            category=NotificationCategory.APPROVAL_REQUIRED,
+            severity="critical" if approval_cat == ApprovalCategory.C else "high",
+            title=f"Approval Required (Cat {approval_cat.value}): {title[:180]}",
+            message=rationale or f"Action `{action_type}` waiting for operator approval.",
+            resource_type=target_resource_type,
+            resource_id=str(target_resource_id),
+            environment_name=environment_name,
+            action_href="/approvals",
+            metadata={"approval_id": str(approval.id), "action_type": action_type},
+        )
         return approval
 
     @classmethod

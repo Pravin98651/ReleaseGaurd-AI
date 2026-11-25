@@ -6,15 +6,17 @@ import asyncio
 import uuid
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
+    AuthenticatedOperator,
     DBSession,
     DefaultOperator,
     build_supervisor,
+    rate_limit_dependency,
     resolve_session_factory,
 )
 from app.api.v1.errors import APIException
@@ -91,6 +93,7 @@ async def _task_to_out(session: AsyncSession, task: AgentTask, after_seq: int | 
 @agent_router.get("/sessions", response_model=list[AgentSessionOut])
 async def list_agent_sessions(
     session: DBSession,
+    _: AuthenticatedOperator,
 ) -> list[AgentSessionOut]:
     """List agent conversation sessions ordered by most recently updated."""
     rows = (
@@ -131,6 +134,7 @@ async def create_agent_session(
 async def get_agent_session(
     session_id: uuid.UUID,
     session: DBSession,
+    _: AuthenticatedOperator,
 ) -> AgentSessionDetailOut:
     """Return full agent session details, chat history, and tasks."""
     agent_sess = await session.get(AgentSession, session_id)
@@ -157,6 +161,7 @@ async def get_agent_session(
     "/sessions/{session_id}/messages",
     response_model=AgentTaskDispatchResponse,
     status_code=202,
+    dependencies=[Depends(rate_limit_dependency("agent_messages", max_requests=25, window_seconds=60))],
 )
 async def send_agent_message(
     session_id: uuid.UUID,
@@ -227,6 +232,7 @@ async def send_agent_message(
 async def get_agent_task(
     task_id: uuid.UUID,
     session: DBSession,
+    _: AuthenticatedOperator,
     after_seq: Annotated[int | None, Query(ge=0)] = None,
 ) -> AgentTaskOut:
     """Polling fallback endpoint returning steps_log after `after_seq` and pending approvals."""
@@ -240,6 +246,7 @@ async def get_agent_task(
 async def cancel_agent_task(
     task_id: uuid.UUID,
     session: DBSession,
+    _: DefaultOperator,
 ) -> AgentTaskOut:
     """Cancel an active or awaiting-approval agent task and void its pending approvals."""
     task = await session.get(AgentTask, task_id)
@@ -282,6 +289,7 @@ async def stream_agent_task(
     task_id: uuid.UUID,
     request: Request,
     session: DBSession,
+    _: AuthenticatedOperator,
     after_seq: Annotated[int, Query(ge=0)] = 0,
 ) -> StreamingResponse:
     """Stream real-time agent events as SSE (`text/event-stream`) with DB replay."""

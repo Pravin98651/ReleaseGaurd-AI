@@ -287,7 +287,11 @@ class ToolExecutionContext:
                 "rollout_percentage": rollout_pct,
                 "mv_options": mv_state_list,
                 "segment_overrides": seg_overrides,
-                "version_uuid": base_fs.get("version_uuid") if base_fs else None,
+                "version_uuid": (
+                    base_fs.get("version_uuid") or base_fs.get("environment_feature_version")
+                )
+                if base_fs
+                else None,
             }
 
         existing = await self.find_feature_flag(flag_key=flag_key, project_id=pid)

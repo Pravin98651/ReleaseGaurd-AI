@@ -10,8 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import (
+    AdminOperator,
+    AuthenticatedOperator,
     DBSession,
-    DefaultOperator,
     build_flagsmith_client,
     build_github_client,
 )
@@ -156,6 +157,7 @@ async def _upsert_integration_connection(
 @settings_router.get("", response_model=WorkspaceSettingsOut)
 async def get_workspace_settings(
     session: DBSession,
+    _: AuthenticatedOperator,
 ) -> WorkspaceSettingsOut:
     """Return workspace policy, Gemini model, thresholds, and masked integrations."""
     ws = await PolicyEngine.get_workspace_settings(session)
@@ -168,7 +170,7 @@ async def get_workspace_settings(
 async def update_workspace_settings(
     body: WorkspaceSettingsUpdate,
     session: DBSession,
-    operator: DefaultOperator,
+    operator: AdminOperator,
 ) -> WorkspaceSettingsOut:
     """Update policy confirmation toggle, TTL, Gemini model, or thresholds."""
     ws = await PolicyEngine.get_workspace_settings(session)
@@ -211,6 +213,7 @@ async def update_workspace_settings(
 @integrations_router.get("", response_model=list[IntegrationConnectionOut])
 async def list_integrations(
     session: DBSession,
+    _: AuthenticatedOperator,
 ) -> list[IntegrationConnectionOut]:
     """List connected/disconnected integrations with masked token hints only."""
     return await _list_masked_integrations(session)
@@ -220,6 +223,7 @@ async def list_integrations(
 async def start_github_oauth(
     request: Request,
     session: DBSession,
+    _: AdminOperator,
     include_private: Annotated[bool, Query()] = False,
 ) -> GitHubOAuthStartResponse:
     """Start GitHub OAuth web flow with CSRF-signed HMAC state."""
@@ -246,7 +250,7 @@ async def complete_github_oauth_callback(
     request: Request,
     body: GitHubOAuthCallbackRequest,
     session: DBSession,
-    operator: DefaultOperator,
+    operator: AdminOperator,
 ) -> IntegrationConnectionOut:
     """Verify OAuth state, exchange authorization code, and store Fernet-encrypted token."""
     try:
@@ -312,7 +316,7 @@ async def connect_github_pat(
     request: Request,
     body: GitHubPatConnectRequest,
     session: DBSession,
-    operator: DefaultOperator,
+    operator: AdminOperator,
 ) -> IntegrationConnectionOut:
     """Verify GitHub Fine-Grained PAT, encrypt with Fernet, and persist connection."""
     gh = await build_github_client(request.app, session, token=body.token.strip())
@@ -353,7 +357,7 @@ async def connect_flagsmith(
     request: Request,
     body: FlagsmithConnectRequest,
     session: DBSession,
-    operator: DefaultOperator,
+    operator: AdminOperator,
 ) -> IntegrationConnectionOut:
     """Verify Flagsmith org token, detect v2 versioning, encrypt token, and probe experiments."""
     fs = await build_flagsmith_client(request.app, session, org_token=body.org_token.strip())
@@ -428,6 +432,7 @@ async def connect_flagsmith(
 async def probe_flagsmith_capability(
     request: Request,
     session: DBSession,
+    _: AdminOperator,
     body: FlagsmithProbeRequest | None = None,
 ) -> FlagsmithProbeResponse:
     """Probe Flagsmith experimentation capability and update workspace analytics_mode."""
@@ -481,7 +486,7 @@ async def probe_flagsmith_capability(
 async def disconnect_integration(
     provider: str,
     session: DBSession,
-    operator: DefaultOperator,
+    operator: AdminOperator,
 ) -> dict[str, Any]:
     """Disconnect a provider integration and revoke stored encrypted secrets."""
     try:

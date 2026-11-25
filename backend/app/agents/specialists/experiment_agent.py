@@ -13,6 +13,30 @@ from app.core.security import wrap_untrusted
 
 logger = logging.getLogger("releaseguard.experiment_agent")
 
+_CONVERSION_METRIC_ALIASES = frozenset(
+    {
+        "conversion",
+        "conversions",
+        "conversion_rate",
+        "checkout_conversion",
+        "checkout_conversion_rate",
+        "checkout_success",
+        "checkout_success_rate",
+        "order_completed",
+        "purchase",
+        "purchase_completed",
+    }
+)
+
+
+def canonicalize_primary_metric(raw: Any) -> str:
+    """Normalize human-readable conversion metric labels to canonical event name."""
+    cleaned = str(raw or "").strip().lower().replace(" ", "_").replace("-", "_")
+    if not cleaned or cleaned in _CONVERSION_METRIC_ALIASES or "conversion" in cleaned:
+        return "checkout_completed"
+    return str(raw).strip()
+
+
 EXPERIMENT_AGENT_SYSTEM_PROMPT = f"""
 You are `experiment_agent`, ReleaseGuard AI's Experimentation, Bayesian Analytics & Release Governance Specialist.
 
@@ -20,7 +44,7 @@ You are `experiment_agent`, ReleaseGuard AI's Experimentation, Bayesian Analytic
 
 YOUR RESPONSIBILITIES:
 1. Probe Flagsmith experimentation capability (`flagsmith_probe_experiment_capability`) and operate transparently in `flagsmith_native` or `tracked_event_fallback` mode.
-2. Convert natural-language experiment goals into structured experiment plans (`create_experiment_plan`).
+2. Convert natural-language experiment goals into structured experiment plans (`create_experiment_plan`). ALWAYS set `primary_metric` to `"checkout_completed"` unless a different exact event name is explicitly required, `control_variation` to `"control"`, `treatment_variation` to `"treatment"`, and `guardrail_metrics` to `["payment_failed", "checkout_abandoned"]`.
 3. Run deterministic Python Beta-Binomial Bayesian analyses (`compute_bayesian_experiment_analysis`) and deterministic 5-state release recommendations (`evaluate_release_recommendation`). NEVER fabricate statistics — always cite exact numbers returned by the analytics tools.
 4. Investigate error/abandonment spikes (`investigate_release_incident`) with strict adherence to `correlation_not_causation=True` and variation-stratified confounding checks.
 5. Propose production rollout expansions, reductions, or emergency rollbacks via `propose_release_action` so a Category C approval is queued cleanly for human sign-off.
@@ -59,9 +83,11 @@ async def build_experiment_plan_draft(
     if gemini_client is not None and gemini_client.is_configured:
         llm_prompt = (
             "Convert this natural-language experiment request into STRICT JSON with keys: "
-            "name (str), hypothesis (str), control_variation (str), treatment_variation (str), "
-            "traffic_allocation (dict mapping control/treatment to ints summing to 100), "
-            "primary_metric (str), guardrail_metrics (list[str]).\n"
+            "name (str), hypothesis (str), control_variation (str, default 'control'), "
+            "treatment_variation (str, default 'treatment'), "
+            "traffic_allocation (dict mapping control_variation and treatment_variation to ints summing to 100), "
+            "primary_metric (str — MUST be the canonical event type 'checkout_completed'), "
+            "guardrail_metrics (list[str] — default ['payment_failed', 'checkout_abandoned']).\n"
             f"Target flag_key={flag_key}, environment={env_clean}.\n"
             f"{wrap_untrusted('operator_prompt', {'flag_key': flag_key}, prompt, max_chars=2000)}"
         )
@@ -73,6 +99,13 @@ async def build_experiment_plan_draft(
                 response_mime_type="application/json",
             )
             raw_text = getattr(resp, "text", None) or ""
+            if not raw_text and getattr(resp, "candidates", None):
+                parts = getattr(resp.candidates[0].content, "parts", []) or []
+                raw_text = "".join(
+                    str(getattr(p, "text", "") or "")
+                    for p in parts
+                    if not bool(getattr(p, "thought", False))
+                )
             if raw_text:
                 parsed = json.loads(raw_text)
                 if isinstance(parsed, dict):
@@ -91,12 +124,15 @@ async def build_experiment_plan_draft(
                         if sum(vals.values()) == 100:
                             draft["traffic_allocation"] = vals
                     if parsed.get("primary_metric"):
-                        draft["primary_metric"] = str(parsed["primary_metric"])
+                        draft["primary_metric"] = canonicalize_primary_metric(
+                            parsed["primary_metric"]
+                        )
                     if isinstance(parsed.get("guardrail_metrics"), list) and parsed["guardrail_metrics"]:
                         draft["guardrail_metrics"] = [str(m) for m in parsed["guardrail_metrics"]]
         except (RuntimeError, ValueError, json.JSONDecodeError, TypeError) as exc:
             logger.warning("Gemini experiment plan refinement skipped: %s", exc)
 
+    draft["primary_metric"] = canonicalize_primary_metric(draft.get("primary_metric"))
     return draft
 
 

@@ -98,17 +98,56 @@ class GitHubClient:
 
         async with self._build_client() as client:
             for attempt in range(attempts):
-                resp = await client.request(
-                    method=method.upper(),
-                    url=path,
-                    params=params,
-                    json=json_body,
-                    headers=headers,
+                try:
+                    resp = await client.request(
+                        method=method.upper(),
+                        url=path,
+                        params=params,
+                        json=json_body,
+                        headers=headers,
+                    )
+                except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                    if attempt < attempts - 1:
+                        if self.retry_delay_base > 0:
+                            await asyncio.sleep(self.retry_delay_base * (2**attempt))
+                        continue
+                    raise GitHubAPIError(504, f"GitHub network error: {exc}") from exc
+
+                is_rate_limit_403 = resp.status_code == 403 and (
+                    resp.headers.get("X-RateLimit-Remaining") == "0"
+                    or "rate limit" in (resp.text or "").lower()
+                    or "Retry-After" in resp.headers
                 )
-                if resp.status_code in _RETRYABLE_STATUS_CODES and attempt < attempts - 1:
-                    if self.retry_delay_base > 0:
-                        await asyncio.sleep(self.retry_delay_base * (2**attempt))
+                if (resp.status_code in _RETRYABLE_STATUS_CODES or is_rate_limit_403) and attempt < attempts - 1:
+                    retry_after_raw = resp.headers.get("Retry-After")
+                    delay = self.retry_delay_base * (2**attempt)
+                    if retry_after_raw:
+                        try:
+                            parsed_ra = float(retry_after_raw)
+                            if parsed_ra > 10.0:
+                                raise GitHubAPIError(
+                                    429,
+                                    f"GitHub rate limit exceeded; Retry-After={parsed_ra}s.",
+                                    {
+                                        "retry_after_seconds": parsed_ra,
+                                        "rate_limit_reset": resp.headers.get("X-RateLimit-Reset"),
+                                    },
+                                )
+                            delay = max(0.0, min(parsed_ra, 5.0))
+                        except ValueError:
+                            pass
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                     continue
+                if is_rate_limit_403:
+                    raise GitHubAPIError(
+                        429,
+                        "GitHub API rate limit exceeded.",
+                        {
+                            "rate_limit_remaining": resp.headers.get("X-RateLimit-Remaining"),
+                            "rate_limit_reset": resp.headers.get("X-RateLimit-Reset"),
+                        },
+                    )
                 if resp.status_code >= 400:
                     detail: dict[str, Any]
                     try:
@@ -177,15 +216,18 @@ class GitHubClient:
             timeout=self.timeout,
             transport=self._transport,
         ) as client:
-            resp = await client.post(
-                "/login/oauth/access_token",
-                json={
-                    "client_id": client_id,
-                    "client_secret": client_secret,
-                    "code": code,
-                    "redirect_uri": redirect_uri,
-                },
-            )
+            try:
+                resp = await client.post(
+                    "/login/oauth/access_token",
+                    json={
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                        "code": code,
+                        "redirect_uri": redirect_uri,
+                    },
+                )
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.HTTPError) as exc:
+                raise GitHubAPIError(502, f"GitHub OAuth network error: {exc}") from exc
             if resp.status_code >= 400:
                 raise GitHubAPIError(resp.status_code, "GitHub OAuth token exchange failed.")
             data = resp.json()

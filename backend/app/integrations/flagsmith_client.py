@@ -50,6 +50,20 @@ def _extract_percentage_split(segment_data: dict[str, Any]) -> int | None:
     return None
 
 
+def _normalize_feature_state_value(raw_val: Any) -> Any:
+    """Flatten Flagsmith v2 feature_state_value dict when safe while keeping custom strings."""
+    if not isinstance(raw_val, dict):
+        return raw_val
+    val_type = str(raw_val.get("type", "")).lower()
+    if val_type == "int":
+        return raw_val.get("integer_value")
+    if val_type == "bool":
+        return raw_val.get("boolean_value")
+    if "string_value" in raw_val:
+        return raw_val.get("string_value")
+    return raw_val
+
+
 class FlagsmithClient:
     """Async httpx client for Flagsmith Management API, Edge API, v1/v2 mutations, and Probe."""
 
@@ -72,6 +86,7 @@ class FlagsmithClient:
         self.retry_delay_base = retry_delay_base
         self._transport = transport
         self._env_v2_cache: dict[str, bool] = {}
+        self._env_id_cache: dict[str, int] = {}
 
         parsed = urlsplit(self.api_url)
         self.host_origin = f"{parsed.scheme}://{parsed.netloc}" if parsed.scheme else ""
@@ -104,15 +119,37 @@ class FlagsmithClient:
             transport=self._transport,
         ) as client:
             for attempt in range(attempts):
-                resp = await client.request(
-                    method=method.upper(),
-                    url=url,
-                    params=params,
-                    json=json_body,
-                )
+                try:
+                    resp = await client.request(
+                        method=method.upper(),
+                        url=url,
+                        params=params,
+                        json=json_body,
+                    )
+                except (httpx.TimeoutException, httpx.ConnectError) as exc:
+                    if attempt < attempts - 1:
+                        if self.retry_delay_base > 0:
+                            await asyncio.sleep(self.retry_delay_base * (2**attempt))
+                        continue
+                    raise FlagsmithAPIError(504, f"Flagsmith network error: {exc}") from exc
+
                 if resp.status_code in _RETRYABLE_STATUS_CODES and attempt < attempts - 1:
-                    if self.retry_delay_base > 0:
-                        await asyncio.sleep(self.retry_delay_base * (2**attempt))
+                    retry_after_raw = resp.headers.get("Retry-After")
+                    delay = self.retry_delay_base * (2**attempt)
+                    if retry_after_raw:
+                        try:
+                            parsed_ra = float(retry_after_raw)
+                            if parsed_ra > 10.0:
+                                raise FlagsmithAPIError(
+                                    resp.status_code,
+                                    f"Flagsmith rate limit exceeded; Retry-After={parsed_ra}s.",
+                                    {"retry_after_seconds": parsed_ra},
+                                )
+                            delay = max(0.0, min(parsed_ra, 5.0))
+                        except ValueError:
+                            pass
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                     continue
                 if allow_statuses and resp.status_code in allow_statuses:
                     return resp
@@ -203,9 +240,12 @@ class FlagsmithClient:
         for env in envs:
             api_key = env.get("api_key")
             if api_key:
-                self._env_v2_cache[str(api_key)] = bool(
+                key_str = str(api_key)
+                self._env_v2_cache[key_str] = bool(
                     env.get("use_v2_feature_versioning", False)
                 )
+                if env.get("id") is not None:
+                    self._env_id_cache[key_str] = int(env["id"])
         return envs
 
     async def get_environment(self, env_key: str) -> dict[str, Any]:
@@ -213,7 +253,21 @@ class FlagsmithClient:
         resp = await self._mgmt("GET", f"/environments/{env_key}/")
         env = dict(resp.json())
         self._env_v2_cache[env_key] = bool(env.get("use_v2_feature_versioning", False))
+        if env.get("id") is not None:
+            self._env_id_cache[env_key] = int(env["id"])
         return env
+
+    async def get_environment_id(self, env_key: str) -> int | None:
+        """Resolve Flagsmith numeric environment ID from cache or environment endpoint."""
+        if env_key in self._env_id_cache:
+            return self._env_id_cache[env_key]
+        try:
+            env = await self.get_environment(env_key)
+        except FlagsmithAPIError:
+            return None
+        if env.get("id") is not None:
+            return int(env["id"])
+        return None
 
     async def is_v2_environment(self, env_key: str, *, refresh: bool = False) -> bool:
         """Return cached use_v2_feature_versioning boolean, probing Flagsmith if uncached."""
@@ -345,6 +399,7 @@ class FlagsmithClient:
 
         payload = {
             "name": segment_name,
+            "project": project_id,
             "rules": [
                 {
                     "type": "ALL",
@@ -353,7 +408,11 @@ class FlagsmithClient:
                         {
                             "type": "ANY",
                             "conditions": [
-                                {"operator": "PERCENTAGE_SPLIT", "value": str(percentage)}
+                                {
+                                    "property": None,
+                                    "operator": "PERCENTAGE_SPLIT",
+                                    "value": str(percentage),
+                                }
                             ],
                             "rules": [],
                         }
@@ -389,10 +448,53 @@ class FlagsmithClient:
         *,
         feature_id: int | None = None,
     ) -> list[dict[str, Any]]:
-        """Read live Management API feature states for an environment."""
+        """Read live Management API feature states (including v2 published version overrides)."""
         params = {"feature": feature_id} if feature_id is not None else None
         resp = await self._mgmt("GET", f"/environments/{env_key}/featurestates/", params=params)
-        return _extract_items(resp.json())
+        items = _extract_items(resp.json())
+
+        # On Flagsmith v2 environments, /environments/{env_key}/featurestates/ only returns
+        # the base state (omitting segment overrides). When environment_feature_version is
+        # present, also read the live version's full featurestates (base + segment overrides).
+        if feature_id is not None and items:
+            ver_uuid = next(
+                (
+                    str(it.get("environment_feature_version") or it.get("version_uuid"))
+                    for it in items
+                    if it.get("environment_feature_version") or it.get("version_uuid")
+                ),
+                None,
+            )
+            if ver_uuid:
+                env_id = await self.get_environment_id(env_key)
+                candidate_refs: list[str] = []
+                if env_id is not None:
+                    candidate_refs.append(str(env_id))
+                if env_key not in candidate_refs:
+                    candidate_refs.append(env_key)
+                for env_ref in candidate_refs:
+                    ver_resp = await self._mgmt(
+                        "GET",
+                        f"/environments/{env_ref}/features/{feature_id}/versions/{ver_uuid}/featurestates/",
+                        allow_statuses={404, 405},
+                    )
+                    if ver_resp.status_code == 200:
+                        ver_items = _extract_items(ver_resp.json())
+                        if ver_items:
+                            for vit in ver_items:
+                                vit["environment_feature_version"] = ver_uuid
+                                vit["version_uuid"] = ver_uuid
+                                vit["feature_state_value"] = _normalize_feature_state_value(
+                                    vit.get("feature_state_value")
+                                )
+                            return ver_items
+                        break
+
+        for it in items:
+            if it.get("environment_feature_version") and not it.get("version_uuid"):
+                it["version_uuid"] = it["environment_feature_version"]
+            it["feature_state_value"] = _normalize_feature_state_value(it.get("feature_state_value"))
+        return items
 
     async def get_edge_flags(self, env_key: str) -> list[dict[str, Any]]:
         """Read SDK-equivalent environment flags from Flagsmith Edge Flags API."""
@@ -521,15 +623,30 @@ class FlagsmithClient:
                 "response": dict(resp.json()) if resp.content else {},
             }
 
-        # Explicit v2 Version Lifecycle: create draft -> inspect/patch draft featurestates -> publish
-        create_ver_resp = await self._mgmt(
-            "POST",
-            f"/environments/{env_key}/features/{feature_id}/versions/",
-            json_body={},
-            allow_statuses={404, 405},
-        )
-        if create_ver_resp.status_code in {404, 405}:
-            # Fallback to /api/__future__/ shorthand when /versions/ endpoint is unavailable
+        # Explicit v2 Version Lifecycle: numeric environment id first (Flagsmith Cloud),
+        # with env_key fallback for mocks and /api/__future__/ shorthand when 404/405.
+        env_id = await self.get_environment_id(env_key)
+        candidate_refs: list[str] = []
+        if env_id is not None:
+            candidate_refs.append(str(env_id))
+        if env_key not in candidate_refs:
+            candidate_refs.append(env_key)
+
+        active_ref: str | None = None
+        create_ver_resp: httpx.Response | None = None
+        for env_ref in candidate_refs:
+            resp = await self._mgmt(
+                "POST",
+                f"/environments/{env_ref}/features/{feature_id}/versions/",
+                json_body={},
+                allow_statuses={404, 405},
+            )
+            if resp.status_code not in {404, 405}:
+                active_ref = env_ref
+                create_ver_resp = resp
+                break
+
+        if active_ref is None or create_ver_resp is None:
             return await self._mutate_v2(
                 env_key,
                 feature_id,
@@ -548,7 +665,7 @@ class FlagsmithClient:
 
         draft_states_resp = await self._mgmt(
             "GET",
-            f"/environments/{env_key}/features/{feature_id}/versions/{version_uuid}/featurestates/",
+            f"/environments/{active_ref}/features/{feature_id}/versions/{version_uuid}/featurestates/",
         )
         draft_states = _extract_items(draft_states_resp.json())
         seg_id = segment_override["segment_id"] if segment_override else None
@@ -561,7 +678,7 @@ class FlagsmithClient:
                 )
             await self._mgmt(
                 "PATCH",
-                f"/environments/{env_key}/features/{feature_id}/versions/{version_uuid}/featurestates/{base_fs['id']}/",
+                f"/environments/{active_ref}/features/{feature_id}/versions/{version_uuid}/featurestates/{base_fs['id']}/",
                 json_body=base_updates,
             )
 
@@ -577,13 +694,25 @@ class FlagsmithClient:
             if seg_fs is not None:
                 await self._mgmt(
                     "PATCH",
-                    f"/environments/{env_key}/features/{feature_id}/versions/{version_uuid}/featurestates/{seg_fs['id']}/",
+                    f"/environments/{active_ref}/features/{feature_id}/versions/{version_uuid}/featurestates/{seg_fs['id']}/",
                     json_body=seg_payload,
                 )
             elif segment_override.get("create_if_missing", True):
+                if "feature_state_value" not in seg_payload:
+                    default_fsv = (
+                        base_fs.get("feature_state_value")
+                        if base_fs and isinstance(base_fs.get("feature_state_value"), dict)
+                        else {
+                            "type": "unicode",
+                            "string_value": None,
+                            "integer_value": None,
+                            "boolean_value": None,
+                        }
+                    )
+                    seg_payload["feature_state_value"] = default_fsv
                 await self._mgmt(
                     "POST",
-                    f"/environments/{env_key}/features/{feature_id}/versions/{version_uuid}/featurestates/",
+                    f"/environments/{active_ref}/features/{feature_id}/versions/{version_uuid}/featurestates/",
                     json_body={
                         "feature": feature_id,
                         "feature_segment": {
@@ -596,8 +725,8 @@ class FlagsmithClient:
 
         pub_resp = await self._mgmt(
             "POST",
-            f"/environments/{env_key}/features/{feature_id}/versions/{version_uuid}/publish/",
-            json_body={"live_from": None},
+            f"/environments/{active_ref}/features/{feature_id}/versions/{version_uuid}/publish/",
+            json_body={},
         )
         pub_data = dict(pub_resp.json()) if pub_resp.content else {}
         return {

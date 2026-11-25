@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 from fastapi import APIRouter, Query, Response
 from sqlalchemy import func, select
 
-from app.api.deps import DBSession
+from app.api.deps import AuthenticatedOperator, DBSession
 from app.models import (
     AuditLog,
     AuditStatus,
@@ -67,6 +67,7 @@ def _apply_audit_filters(
 @audit_router.get("/audit-logs", response_model=PaginatedResponse[AuditLogOut])
 async def list_audit_logs(
     session: DBSession,
+    _: AuthenticatedOperator,
     policy_category: Annotated[PolicyCategory | None, Query()] = None,
     event_action: Annotated[str | None, Query()] = None,
     resource_type: Annotated[str | None, Query()] = None,
@@ -120,6 +121,7 @@ async def list_audit_logs(
 @audit_router.get("/audit-logs/export")
 async def export_audit_logs(
     session: DBSession,
+    _: AuthenticatedOperator,
     format: Annotated[Literal["json", "csv"], Query()] = "json",
     policy_category: Annotated[PolicyCategory | None, Query()] = None,
     event_action: Annotated[str | None, Query()] = None,
@@ -188,6 +190,7 @@ async def export_audit_logs(
 @audit_router.get("/rollout-history")
 async def list_rollout_history(
     session: DBSession,
+    _: AuthenticatedOperator,
     feature_flag_id: Annotated[uuid.UUID | None, Query()] = None,
     environment_name: Annotated[str | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=200)] = 50,

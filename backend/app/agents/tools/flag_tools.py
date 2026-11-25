@@ -14,6 +14,7 @@ from app.analytics.flag_health import (
     scan_project_flag_health,
 )
 from app.core.database import utcnow
+from app.core.security import make_token_hint
 from app.models import (
     Experiment,
     ExperimentEvent,
@@ -83,7 +84,7 @@ async def handle_flagsmith_list_environments(
         {
             "id": e.get("id"),
             "name": e.get("name", ""),
-            "api_key": e.get("api_key", ""),
+            "api_key": make_token_hint(str(e.get("api_key", ""))),
             "is_production": bool(
                 e["is_production"]
                 if "is_production" in e

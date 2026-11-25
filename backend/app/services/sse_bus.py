@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import uuid
 from collections import defaultdict
@@ -158,6 +159,74 @@ class SSEBus:
             self._subscribers[task_key].discard(queue)
             if not self._subscribers[task_key]:
                 self._subscribers.pop(task_key, None)
+
+    def _ws_state(self) -> tuple[set[asyncio.Queue[dict[str, Any]]], list[dict[str, Any]]]:
+        subs = self.__dict__.setdefault("_ws_subscribers", set())
+        hist = self.__dict__.setdefault("_ws_history", [])
+        return subs, hist
+
+    async def publish_workspace_event(
+        self,
+        event_type: str,
+        payload: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Broadcast a workspace-wide operational event with ring-buffer replay support."""
+        subs, hist = self._ws_state()
+        seq = int(self.__dict__.get("_ws_seq", 0)) + 1
+        self.__dict__["_ws_seq"] = seq
+        event = {
+            "seq": seq,
+            "event_type": event_type,
+            "timestamp": utcnow().isoformat(),
+            "payload": payload or {},
+        }
+        hist.append(event)
+        if len(hist) > 250:
+            del hist[: len(hist) - 250]
+
+        for q in list(subs):
+            if q.full():
+                with contextlib.suppress(asyncio.QueueEmpty):
+                    q.get_nowait()
+            q.put_nowait(event)
+        return event
+
+    async def subscribe_workspace(
+        self,
+        *,
+        after_seq: int = 0,
+        heartbeat_seconds: float = 15.0,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield buffered workspace events > after_seq followed by live events & heartbeats."""
+        subs, hist = self._ws_state()
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=256)
+        subs.add(queue)
+        last_seq = max(0, int(after_seq))
+        try:
+            for item in list(hist):
+                seq = int(item.get("seq") or 0)
+                if seq > last_seq:
+                    last_seq = seq
+                    yield item
+
+            while True:
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=heartbeat_seconds)
+                except TimeoutError:
+                    yield {
+                        "seq": None,
+                        "event_type": "heartbeat",
+                        "timestamp": utcnow().isoformat(),
+                        "payload": {"timestamp": utcnow().isoformat()},
+                    }
+                    continue
+                seq = int(event.get("seq") or 0)
+                if seq <= last_seq:
+                    continue
+                last_seq = seq
+                yield event
+        finally:
+            subs.discard(queue)
 
 
 sse_bus = SSEBus()

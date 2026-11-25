@@ -9,7 +9,7 @@ from fastapi import APIRouter
 from sqlalchemy import select
 
 from app.analytics.incidents import investigate_incident
-from app.api.deps import DBSession
+from app.api.deps import AuthenticatedOperator, DBSession, DefaultOperator
 from app.core.database import utcnow
 from app.models import (
     ActorType,
@@ -37,6 +37,7 @@ releases_router = APIRouter(prefix="/releases", tags=["releases"])
 @releases_router.get("/overview")
 async def get_releases_overview(
     session: DBSession,
+    _: AuthenticatedOperator,
 ) -> dict[str, Any]:
     """Return active gradual rollouts, recent history, recommendations, and incident alerts."""
     flags = (
@@ -181,6 +182,7 @@ async def get_releases_overview(
 async def investigate_release_incident(
     body: IncidentInvestigateRequest,
     session: DBSession,
+    _: DefaultOperator,
 ) -> dict[str, Any]:
     """Category A: Investigate error/abandonment spikes with explicit correlation != causation."""
     env_norm = body.environment_name.strip().lower()

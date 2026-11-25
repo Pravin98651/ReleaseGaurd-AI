@@ -12,11 +12,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.approval_executor import execute_approval_request
 from app.api.deps import (
+    ApproverOperator,
+    AuthenticatedOperator,
     DBSession,
-    DefaultOperator,
     build_gemini_client_from_app,
     build_supervisor,
     build_tool_context,
+    is_auth_required,
 )
 from app.api.v1.errors import APIException
 from app.models import (
@@ -73,6 +75,7 @@ async def _resume_linked_agent_task(
 @approvals_router.get("", response_model=PaginatedResponse[ApprovalOut])
 async def list_approvals(
     session: DBSession,
+    _: AuthenticatedOperator,
     status: Annotated[ApprovalStatus | None, Query()] = None,
     policy_category: Annotated[ApprovalCategory | None, Query()] = None,
     environment_name: Annotated[str | None, Query()] = None,
@@ -116,6 +119,7 @@ async def list_approvals(
 async def get_approval(
     approval_id: uuid.UUID,
     session: DBSession,
+    _: AuthenticatedOperator,
 ) -> ApprovalOut:
     """Return full approval details including action_hash, payload, and expected_precondition."""
     approval = await session.get(Approval, approval_id)
@@ -129,13 +133,25 @@ async def approve_action(
     approval_id: uuid.UUID,
     request: Request,
     session: DBSession,
-    operator: DefaultOperator,
+    operator: ApproverOperator,
     body: ApprovalApproveRequest | None = None,
 ) -> ApprovalDecisionResponse:
     """Execute single-use hash-verified approval with live drift revalidation and LangGraph resume."""
     approval = await session.get(Approval, approval_id)
     if approval is None:
         raise APIException(404, "APPROVAL_NOT_FOUND", f"Approval {approval_id} not found.")
+    if (
+        is_auth_required(request)
+        and approval.policy_category == ApprovalCategory.C
+        and approval.requested_by_id is not None
+        and approval.requested_by_id == operator.id
+        and operator.role.value != "admin"
+    ):
+        raise APIException(
+            403,
+            "SELF_APPROVAL_FORBIDDEN",
+            "Category C production approvals require an independent approver when authentication is enabled.",
+        )
 
     ctx = await build_tool_context(request.app, session, user_id=operator.id)
     comment = body.comment if body else None
@@ -175,6 +191,22 @@ async def approve_action(
             "result": updated.execution_result or {},
         },
     )
+    from app.models import NotificationCategory
+    from app.services.notification_service import create_notification
+
+    await create_notification(
+        session,
+        category=NotificationCategory.APPROVAL_DECIDED,
+        severity="info",
+        title=f"Approval Executed: {updated.title[:180]}",
+        message=comment or f"Approved and executed `{updated.action_type}`.",
+        resource_type=updated.target_resource_type,
+        resource_id=updated.target_resource_id,
+        environment_name=updated.environment_name,
+        action_href="/approvals",
+        metadata={"approval_id": str(updated.id), "decision": "approved"},
+    )
+    await session.commit()
     return ApprovalDecisionResponse(
         approval=ApprovalOut.model_validate(updated),
         resumed_task_id=resumed_task_id,
@@ -187,7 +219,7 @@ async def reject_action(
     body: ApprovalRejectRequest,
     request: Request,
     session: DBSession,
-    operator: DefaultOperator,
+    operator: ApproverOperator,
 ) -> ApprovalDecisionResponse:
     """Reject a pending approval and resume any waiting LangGraph task cleanly."""
     rejected = await PolicyEngine.reject_approval(
@@ -206,6 +238,22 @@ async def reject_action(
             "comment": body.comment,
         },
     )
+    from app.models import NotificationCategory
+    from app.services.notification_service import create_notification
+
+    await create_notification(
+        session,
+        category=NotificationCategory.APPROVAL_DECIDED,
+        severity="warning",
+        title=f"Approval Rejected: {rejected.title[:180]}",
+        message=body.comment,
+        resource_type=rejected.target_resource_type,
+        resource_id=rejected.target_resource_id,
+        environment_name=rejected.environment_name,
+        action_href="/approvals",
+        metadata={"approval_id": str(rejected.id), "decision": "rejected"},
+    )
+    await session.commit()
     return ApprovalDecisionResponse(
         approval=ApprovalOut.model_validate(rejected),
         resumed_task_id=resumed_task_id,

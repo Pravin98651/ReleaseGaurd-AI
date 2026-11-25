@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     EVENT_INGEST_KEY: str = "dev-ingest-key-change-me"
     PATCH_VALIDATION_TIMEOUT_SECONDS: int = Field(default=30, ge=1, le=300)
 
+    # --- Control Plane Authentication & RBAC ---
+    REQUIRE_AUTH: bool = False
+    AUTH_SESSION_TTL_SECONDS: int = Field(default=86400, ge=300, le=2592000)
+    AUTH_OPERATOR_EMAIL: str = "operator@releaseguard.local"
+    AUTH_OPERATOR_PASSWORD: str = ""
+
     # --- ReleaseGuard Frontend Control Plane (35-37) ---
     FRONTEND_PORT: int = 3000
     NEXT_PUBLIC_API_BASE_URL: str = "http://localhost:8000"
@@ -136,6 +142,22 @@ class Settings(BaseSettings):
             or self.SECRET_KEY.strip() == "change-me-32-char-random-string"
         ):
             raise ValueError("SECRET_KEY must be set to a strong secret when APP_ENV=production.")
+
+        if self.APP_ENV == "production" and (
+            not self.EVENT_INGEST_KEY.strip()
+            or self.EVENT_INGEST_KEY.strip() == "dev-ingest-key-change-me"
+        ):
+            raise ValueError(
+                "EVENT_INGEST_KEY must be changed from the development default when APP_ENV=production."
+            )
+
+        if self.APP_ENV == "production" and not self.REQUIRE_AUTH:
+            raise ValueError("REQUIRE_AUTH must be enabled (true) when APP_ENV=production.")
+
+        if self.APP_ENV == "production" and (
+            not self.cors_origins_list or "*" in self.cors_origins_list
+        ):
+            raise ValueError("Wildcard or empty CORS_ORIGINS is forbidden when APP_ENV=production.")
 
         return self
 
@@ -194,6 +216,7 @@ class Settings(BaseSettings):
             self.EVENT_INGEST_KEY,
             self.RELEASEGUARD_INGEST_KEY,
             self.POSTGRES_PASSWORD,
+            self.AUTH_OPERATOR_PASSWORD,
         ]
         # Ignore placeholder defaults that are short or non-secret tokens if unset
         return [

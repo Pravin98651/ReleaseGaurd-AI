@@ -10,20 +10,24 @@ import {
   Shield,
   Sliders,
   Trash2,
+  Users,
 } from "lucide-react";
 import {
   completeGithubOAuthCallback,
   connectFlagsmith,
   connectGithubPat,
+  createWorkspaceUser,
   disconnectIntegration,
   getErrorMessage,
   getWorkspaceSettings,
   listIntegrations,
+  listWorkspaceUsers,
   probeFlagsmithCapability,
   startGithubOAuth,
   updateWorkspaceSettings,
 } from "@/lib/api";
 import type {
+  AuthUser,
   GuardrailThresholds,
   HealthThresholds,
   IntegrationConnection,
@@ -41,9 +45,10 @@ import { StatusBadge } from "@/components/StatusBadges";
 import { triggerControlPlaneRefresh } from "@/hooks/use-control-plane-status";
 
 const GEMINI_MODELS = [
+  "gemini-3.5-flash-lite",
+  "gemini-3.8-flash",
   "gemini-2.5-flash",
   "gemini-2.5-pro",
-  "gemini-2.0-flash",
 ];
 
 function SettingsInner() {
@@ -52,6 +57,11 @@ function SettingsInner() {
 
   const [settings, setSettings] = useState<WorkspaceSettings | null>(null);
   const [integrations, setIntegrations] = useState<IntegrationConnection[]>([]);
+  const [users, setUsers] = useState<AuthUser[]>([]);
+  const [newUserEmail, setNewUserEmail] = useState("");
+  const [newUserName, setNewUserName] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [newUserRole, setNewUserRole] = useState("engineer");
 
   // GitHub forms
   const [patToken, setPatToken] = useState("");
@@ -92,12 +102,14 @@ function SettingsInner() {
     setLoading(true);
     setError(null);
     try {
-      const [ws, intList] = await Promise.all([
+      const [ws, intList, userList] = await Promise.all([
         getWorkspaceSettings(),
         listIntegrations().catch(() => []),
+        listWorkspaceUsers().catch(() => []),
       ]);
       setSettings(ws);
       setIntegrations(intList.length > 0 ? intList : (ws.integrations ?? []));
+      setUsers(userList);
       setGeminiModel(ws.gemini_model || "gemini-2.5-flash");
       setCatBConfirm(ws.category_b_requires_confirmation);
       setTtlSeconds(ws.approval_ttl_seconds || 900);
@@ -263,6 +275,31 @@ function SettingsInner() {
       });
       setNotice("Saved workspace policy, Gemini model, and guardrail thresholds.");
       await loadAll();
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleCreateUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newUserEmail.trim() || !newUserName.trim() || !newUserPassword) return;
+    setBusyAction("create_user");
+    setError(null);
+    setNotice(null);
+    try {
+      const created = await createWorkspaceUser({
+        email: newUserEmail.trim(),
+        display_name: newUserName.trim(),
+        password: newUserPassword,
+        role: newUserRole,
+      });
+      setUsers((prev) => [...prev, created]);
+      setNewUserEmail("");
+      setNewUserName("");
+      setNewUserPassword("");
+      setNotice(`Created RBAC operator ${created.email} (${created.role}).`);
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -722,6 +759,89 @@ function SettingsInner() {
                 </button>
               </div>
             </form>
+          </SectionCard>
+
+          {/* RBAC Operators (visible when signed in as ADMIN or dev mode) */}
+          <SectionCard
+            title="RBAC Workspace Operators"
+            subtitle="Role-based backend access control: ADMIN, RELEASE_MANAGER, ENGINEER, VIEWER"
+            actions={<Users className="h-4 w-4 text-indigo-400" />}
+          >
+            <div className="grid gap-6 lg:grid-cols-2">
+              <div className="space-y-2 text-xs">
+                {users.length === 0 ? (
+                  <p className="text-slate-400">
+                    Sign in as an ADMIN operator to inspect and provision RBAC workspace roles.
+                  </p>
+                ) : (
+                  users.map((u) => (
+                    <div
+                      key={u.id}
+                      className="flex items-center justify-between rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-2"
+                    >
+                      <div>
+                        <div className="font-semibold text-slate-100">{u.display_name}</div>
+                        <div className="font-mono text-[11px] text-slate-400">{u.email}</div>
+                      </div>
+                      <span className="rounded border border-indigo-500/40 bg-indigo-500/10 px-2 py-0.5 font-mono text-[10px] uppercase text-indigo-300">
+                        {u.role}
+                      </span>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <form onSubmit={handleCreateUser} className="space-y-3 text-xs">
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input
+                    type="text"
+                    placeholder="Display name"
+                    value={newUserName}
+                    onChange={(e) => setNewUserName(e.target.value)}
+                    className="rounded-lg border border-slate-700 bg-[#090c12] px-3 py-2 text-slate-100 placeholder:text-slate-500"
+                  />
+                  <input
+                    type="email"
+                    placeholder="Email address"
+                    value={newUserEmail}
+                    onChange={(e) => setNewUserEmail(e.target.value)}
+                    className="rounded-lg border border-slate-700 bg-[#090c12] px-3 py-2 text-slate-100 placeholder:text-slate-500"
+                  />
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <input
+                    type="password"
+                    minLength={8}
+                    placeholder="Password (min 8 chars)"
+                    value={newUserPassword}
+                    onChange={(e) => setNewUserPassword(e.target.value)}
+                    className="rounded-lg border border-slate-700 bg-[#090c12] px-3 py-2 text-slate-100 placeholder:text-slate-500"
+                  />
+                  <select
+                    value={newUserRole}
+                    onChange={(e) => setNewUserRole(e.target.value)}
+                    className="rounded-lg border border-slate-700 bg-[#090c12] px-3 py-2 font-mono text-slate-100"
+                  >
+                    <option value="viewer">VIEWER (read-only)</option>
+                    <option value="engineer">ENGINEER / DEVELOPER</option>
+                    <option value="release_manager">RELEASE_MANAGER</option>
+                    <option value="admin">ADMIN</option>
+                  </select>
+                </div>
+                <button
+                  type="submit"
+                  disabled={
+                    busyAction !== null ||
+                    !newUserEmail.trim() ||
+                    !newUserName.trim() ||
+                    newUserPassword.length < 8
+                  }
+                  className="rounded-lg bg-indigo-500 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-400 disabled:opacity-50"
+                >
+                  {busyAction === "create_user" ? "Creating Operator..." : "Add RBAC Operator"}
+                </button>
+              </form>
+            </div>
           </SectionCard>
         </>
       )}

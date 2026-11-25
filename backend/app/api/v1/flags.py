@@ -24,6 +24,7 @@ from app.agents.tools.pr_tools import (
     handle_validate_patch_isolated,
 )
 from app.api.deps import (
+    AuthenticatedOperator,
     DBSession,
     DefaultOperator,
     build_flagsmith_client,
@@ -85,6 +86,7 @@ flag_health_router = APIRouter(prefix="/flag-health", tags=["flag-health"])
 @flags_router.get("", response_model=PaginatedResponse[FeatureFlagOut])
 async def list_feature_flags(
     session: DBSession,
+    _: AuthenticatedOperator,
     project_id: Annotated[int | None, Query()] = None,
     environment: Annotated[str | None, Query()] = None,
     search: Annotated[str | None, Query()] = None,
@@ -445,6 +447,30 @@ async def _handle_flag_mutation(
         status=AuditStatus.SUCCESS,
         details=res,
     )
+    from app.models import NotificationCategory
+    from app.services.notification_service import (
+        broadcast_workspace_event,
+        create_notification,
+    )
+
+    if action_type == "flagsmith_rollback_flag":
+        await create_notification(
+            session,
+            category=NotificationCategory.ROLLBACK_TRIGGERED,
+            severity="high",
+            title=f"Rollback Executed: `{flag.key}` ({environment_name.strip().lower()})",
+            message=rationale or f"Flag `{flag.key}` rolled back to disabled/0%.",
+            resource_type="feature_flag",
+            resource_id=str(flag.id),
+            environment_name=environment_name.strip().lower(),
+            action_href="/releases",
+            metadata=res,
+        )
+    else:
+        await broadcast_workspace_event(
+            "flag.mutated",
+            {"flag_id": str(flag.id), "flag_key": flag.key, "environment": environment_name.strip().lower()},
+        )
     await session.commit()
     await session.refresh(flag)
     return {
@@ -551,6 +577,7 @@ async def rollback_feature_flag(
 @flag_health_router.get("")
 async def get_flag_health(
     session: DBSession,
+    _: AuthenticatedOperator,
     issue_type: Annotated[str | None, Query()] = None,
 ) -> dict[str, Any]:
     """List flags sorted by health_score ASC with explainable detector breakdown."""

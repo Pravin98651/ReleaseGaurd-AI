@@ -7,10 +7,10 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, Query
+from fastapi import APIRouter, Header, Query, Request
 from sqlalchemy import select
 
-from app.api.deps import DBSession
+from app.api.deps import AuthenticatedOperator, DBSession
 from app.api.v1.errors import APIException
 from app.core.database import utcnow
 from app.core.security import verify_ingest_key
@@ -103,6 +103,7 @@ async def ingest_events(
 @events_router.get("/summary", response_model=EventSummaryResponse)
 async def get_events_summary(
     session: DBSession,
+    _: AuthenticatedOperator,
     flag_key: Annotated[str | None, Query()] = None,
     environment_name: Annotated[str | None, Query()] = None,
     experiment_id: Annotated[uuid.UUID | None, Query()] = None,
@@ -149,4 +150,44 @@ async def get_events_summary(
         counts_by_variation=counts_by_variation,
         buckets=buckets,
         total_events=len(rows),
+    )
+
+
+@events_router.get("/stream")
+async def stream_workspace_events(
+    request: Request,
+    _: AuthenticatedOperator,
+    after_seq: Annotated[int, Query(ge=0)] = 0,
+) -> Any:
+    """Stream real-time workspace-wide operational events (notifications, PRs, flags, schedules) via SSE."""
+    import json
+
+    from fastapi.responses import StreamingResponse
+
+    from app.services.sse_bus import sse_bus
+
+    last_id_hdr = request.headers.get("last-event-id")
+    cursor = after_seq
+    if last_id_hdr and last_id_hdr.isdigit():
+        cursor = max(cursor, int(last_id_hdr))
+
+    async def event_generator() -> Any:
+        async for ev in sse_bus.subscribe_workspace(after_seq=cursor, heartbeat_seconds=15.0):
+            if await request.is_disconnected():
+                break
+            seq = ev.get("seq")
+            data_str = json.dumps(ev, default=str)
+            if seq is not None:
+                yield f"id: {seq}\nevent: workspace\ndata: {data_str}\n\n"
+            else:
+                yield f"event: heartbeat\ndata: {data_str}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

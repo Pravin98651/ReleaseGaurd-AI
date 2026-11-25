@@ -151,8 +151,10 @@ export function subscribeToAgentTask(
 
   if (typeof window !== "undefined" && typeof EventSource !== "undefined") {
     try {
-      const url = `${API_BASE_URL}/api/v1/agent/tasks/${taskId}/stream?after_seq=${lastSeq}`;
-      eventSource = new EventSource(url);
+      const storedToken = window.localStorage.getItem("rg_auth_token");
+      const tokenParam = storedToken ? `&token=${encodeURIComponent(storedToken)}` : "";
+      const url = `${API_BASE_URL}/api/v1/agent/tasks/${taskId}/stream?after_seq=${lastSeq}${tokenParam}`;
+      eventSource = new EventSource(url, { withCredentials: true });
       callbacks.onModeChange?.("sse");
 
       for (const evtName of SSE_EVENT_TYPES) {

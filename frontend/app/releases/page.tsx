@@ -45,7 +45,7 @@ export default function ReleasesPage() {
   const [overview, setOverview] = useState<ReleasesOverview | null>(null);
   const [incident, setIncident] = useState<IncidentInvestigationResult | null>(null);
 
-  const [invFlagKey, setInvFlagKey] = useState("checkout_v2");
+  const [invFlagKey, setInvFlagKey] = useState("");
   const [invEnv, setInvEnv] = useState("development");
   const [invWindow, setInvWindow] = useState(60);
 
@@ -61,6 +61,11 @@ export default function ReleasesPage() {
     try {
       const res = await getReleasesOverview();
       setOverview(res);
+      setInvFlagKey((prev) => {
+        if (prev.trim()) return prev;
+        const firstActive = res.active_rollouts?.[0]?.flag_key;
+        return firstActive || "";
+      });
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
