@@ -388,3 +388,117 @@ async def test_flagsmith_v2_missing_version_uuid_raises_502() -> None:
         await client.toggle_flag(env_key="env_key_prod", feature_id=100, enabled=True)
     assert exc_info.value.status_code == 502
     assert "version uuid" in exc_info.value.message.lower()
+
+
+@pytest.mark.asyncio
+async def test_flagsmith_cloud_v2_numeric_env_id_segments_and_version_readback() -> None:
+    """Verify Flagsmith Cloud strict v2 contract: numeric env_id, empty publish, property=None segment, v2 readback."""
+    env_key = "dev_env_key_abc"
+    env_id = 120019
+    project_id = 56055
+    feature_id = 303933
+    live_ver_uuid = "ver-init-1"
+    live_states: list[dict] = [
+        {
+            "id": 1873488,
+            "feature": feature_id,
+            "feature_segment": None,
+            "enabled": False,
+            "feature_state_value": {
+                "type": "unicode",
+                "string_value": None,
+                "integer_value": None,
+                "boolean_value": None,
+            },
+            "multivariate_feature_state_values": [],
+            "environment_feature_version": live_ver_uuid,
+        }
+    ]
+    drafts: dict[str, list[dict]] = {}
+    segments: list[dict] = []
+
+    def cloud_handler(request: httpx.Request) -> httpx.Response:
+        nonlocal live_states, live_ver_uuid
+        path = request.url.path
+        method = request.method
+        body = json.loads(request.content.decode("utf-8")) if request.content else {}
+
+        if path == f"/api/v1/environments/{env_key}/" and method == "GET":
+            return httpx.Response(
+                200,
+                json={
+                    "id": env_id,
+                    "name": "Development",
+                    "api_key": env_key,
+                    "use_v2_feature_versioning": True,
+                },
+            )
+        if path == f"/api/v1/projects/{project_id}/segments/" and method == "GET":
+            return httpx.Response(200, json=segments)
+        if path == f"/api/v1/projects/{project_id}/segments/" and method == "POST":
+            assert body.get("project") == project_id
+            cond = body["rules"][0]["rules"][0]["conditions"][0]
+            assert "property" in cond and cond["property"] is None
+            seg = {"id": 999, **body}
+            segments.append(seg)
+            return httpx.Response(201, json=seg)
+        if path == f"/api/v1/environments/{env_key}/featurestates/" and method == "GET":
+            # Simulate Cloud v2 quirk: only base state returned here with environment_feature_version
+            base_only = [dict(s) for s in live_states if s.get("feature_segment") is None]
+            return httpx.Response(200, json={"results": base_only})
+
+        ver_prefix = f"/api/v1/environments/{env_id}/features/{feature_id}/versions/"
+        if path == ver_prefix and method == "POST":
+            ver_uuid = f"ver-{len(drafts) + 2}"
+            drafts[ver_uuid] = [dict(s) for s in live_states]
+            return httpx.Response(201, json={"uuid": ver_uuid})
+        if path.startswith(ver_prefix):
+            rest = path[len(ver_prefix) :].strip("/").split("/")
+            v_id = rest[0]
+            d_states = drafts.get(v_id) if v_id != live_ver_uuid else live_states
+            assert d_states is not None
+            if len(rest) == 2 and rest[1] == "featurestates" and method == "GET":
+                return httpx.Response(200, json=d_states)
+            if len(rest) == 2 and rest[1] == "featurestates" and method == "POST":
+                assert "feature_state_value" in body
+                new_fs = {
+                    "id": 700 + len(d_states),
+                    "feature": body["feature"],
+                    "feature_segment": body["feature_segment"],
+                    "enabled": body["enabled"],
+                    "feature_state_value": body["feature_state_value"],
+                    "multivariate_feature_state_values": [],
+                }
+                d_states.append(new_fs)
+                return httpx.Response(201, json=new_fs)
+            if len(rest) == 3 and rest[1] == "featurestates" and method == "PATCH":
+                fs_id = int(rest[2])
+                for st in d_states:
+                    if st["id"] == fs_id:
+                        st.update(body)
+                        return httpx.Response(200, json=st)
+                return httpx.Response(404)
+            if len(rest) == 2 and rest[1] == "publish" and method == "POST":
+                assert "live_from" not in body or body["live_from"] is not None
+                live_ver_uuid = v_id
+                live_states = [dict(s, environment_feature_version=v_id) for s in d_states]
+                return httpx.Response(200, json={"live_from": "2026-11-25T14:00:00Z"})
+
+        return httpx.Response(404, json={"detail": f"Unexpected {method} {path}"})
+
+    client = FlagsmithClient(
+        org_token="org_secret_token",
+        transport=httpx.MockTransport(cloud_handler),
+        retry_delay_base=0.0,
+    )
+    res = await client.set_gradual_rollout_stage(
+        project_id=project_id,
+        env_key=env_key,
+        feature_id=feature_id,
+        flag_key="checkout_v2",
+        target_percentage=25,
+    )
+    assert res["mutation"]["mode"] == "v2_versions"
+    assert res["verification"]["matches"] is True
+    assert res["verification"]["actual_state"]["rollout_percentage"] == 25
+    assert res["verification"]["actual_state"]["states_count"] == 2
