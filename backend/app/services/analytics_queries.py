@@ -27,7 +27,10 @@ from app.models import (
     IntegrationConnection,
     IntegrationStatus,
     PullRequest,
+    Release,
+    ReleaseReadinessStatus,
     ReleaseRecommendation,
+    ReleaseStatus,
     Repository,
     RolloutAction,
     RolloutHistory,
@@ -265,6 +268,13 @@ async def load_scoped_dataset(
             continue
         filtered_events.append(ev)
 
+    lc_stmt = select(Release)
+    if flt.environment:
+        lc_stmt = lc_stmt.where(Release.target_environment == flt.environment)
+    if flt.repository_id:
+        lc_stmt = lc_stmt.where(Release.repository_id == flt.repository_id)
+    lifecycle_releases = list((await session.execute(lc_stmt)).scalars().all())
+
     return {
         "repos": repos,
         "prs": prs,
@@ -278,6 +288,7 @@ async def load_scoped_dataset(
         "approvals": approvals,
         "audits": audits,
         "integrations": integrations,
+        "releases": lifecycle_releases,
     }
 
 
@@ -456,6 +467,21 @@ def compute_dashboard_metrics(data: dict[str, Any], flt: FilterWindowMeta) -> Da
 
     avg_duration = round(sum(durations) / len(durations), 2) if durations else None
 
+    from app.services.release_state_machine import TERMINAL_RELEASE_STATES
+
+    lc_rows: list[Release] = list(data.get("releases", []))
+    lc_active = [r for r in lc_rows if r.status not in TERMINAL_RELEASE_STATES]
+    lc_ready = [r for r in lc_active if r.readiness_status == ReleaseReadinessStatus.READY]
+    lc_blocked = [
+        r
+        for r in lc_active
+        if r.status == ReleaseStatus.BLOCKED or r.readiness_status == ReleaseReadinessStatus.BLOCKED
+    ]
+    lc_completed = [r for r in lc_rows if r.status == ReleaseStatus.COMPLETED]
+    lc_avg_score = (
+        round(sum(r.readiness_score for r in lc_rows) / len(lc_rows), 1) if lc_rows else None
+    )
+
     return DashboardMetricsOut(
         filter=flt,
         engineering=EngineeringMetricsBlock(
@@ -475,6 +501,12 @@ def compute_dashboard_metrics(data: dict[str, Any], flt: FilterWindowMeta) -> Da
             rollbacks_executed=rollbacks_exec,
             releases_awaiting_approval=rel_awaiting,
             release_success_rate=rel_success_rate,
+            lifecycle_total_releases=len(lc_rows),
+            lifecycle_active_releases=len(lc_active),
+            lifecycle_ready_releases=len(lc_ready),
+            lifecycle_blocked_releases=len(lc_blocked),
+            lifecycle_completed_releases=len(lc_completed),
+            lifecycle_avg_readiness_score=lc_avg_score,
             trends=rel_trends,
         ),
         feature_flags=FeatureFlagMetricsBlock(

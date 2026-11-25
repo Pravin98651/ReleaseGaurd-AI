@@ -813,9 +813,50 @@ class SchedulerService:
         )
 
         flag_count = len((await session.execute(select(FeatureFlag.id))).all())
+
+        from app.models import Release
+        from app.services.release_readiness import ReleaseReadinessService
+        from app.services.release_state_machine import TERMINAL_RELEASE_STATES
+
+        rel_stmt = select(Release).where(Release.status.notin_(list(TERMINAL_RELEASE_STATES)))
+        if env_filter:
+            rel_stmt = rel_stmt.where(Release.target_environment == env_filter)
+        active_releases = list((await session.execute(rel_stmt.limit(50))).scalars().all())
+        for rel in active_releases:
+            await ReleaseReadinessService.evaluate_release(session, rel, emit_event=False)
+
+        from app.models import (
+            ProgressiveRollout,
+            ProgressiveRolloutStage,
+            ProgressiveRolloutStatus,
+        )
+        from app.services.progressive_delivery import (
+            ProgressiveDeliveryError,
+            ProgressiveDeliveryService,
+        )
+
+        pr_stmt = select(ProgressiveRollout).where(
+            ProgressiveRollout.status == ProgressiveRolloutStatus.OBSERVING
+        )
+        if env_filter:
+            pr_stmt = pr_stmt.where(ProgressiveRollout.environment == env_filter)
+        observing_rollouts = list((await session.execute(pr_stmt.limit(20))).scalars().all())
+        evaluated_rollout_stages = 0
+        for rollout in observing_rollouts:
+            if rollout.current_stage_id:
+                try:
+                    stage = await session.get(ProgressiveRolloutStage, rollout.current_stage_id)
+                    if stage is not None:
+                        await ProgressiveDeliveryService.evaluate_stage(session, rollout, stage)
+                        evaluated_rollout_stages += 1
+                except (ProgressiveDeliveryError, ValueError, RuntimeError) as exc:
+                    logger.warning("Scheduler evaluation skipped for rollout %s: %s", rollout.id, exc)
+
         return {
             "summary": {
                 "flags_tracked": flag_count,
+                "active_releases_evaluated": len(active_releases),
+                "observing_rollouts_evaluated": evaluated_rollout_stages,
                 "recent_rollouts_checked": len(recent_rollouts),
                 "unverified_rollouts": unverified_count,
                 "expired_approvals_closed": expired_count,
@@ -850,6 +891,12 @@ class SchedulerService:
             e for e in running_exps if e.latest_recommendation == ReleaseRecommendation.RECOMMEND_ROLLBACK
         ]
 
+        from app.services.intelligence import ReleaseLearningEngine
+
+        learning_run = await ReleaseLearningEngine.run_analysis(
+            session, analysis_type="scheduled_learning"
+        )
+
         summary_stats = {
             "open_prs": len(open_prs),
             "high_risk_prs": len(high_risk_prs),
@@ -858,6 +905,7 @@ class SchedulerService:
             "pending_approvals": len(pending_approvals),
             "running_experiments": len(running_exps),
             "rollback_recommendations": len(rollback_recs),
+            "learning_run_status": learning_run.status.value,
         }
 
         narrative = (

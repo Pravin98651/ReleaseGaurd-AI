@@ -1,7 +1,7 @@
 "use client";
 
 import React, { Suspense, useCallback, useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import {
   AlertTriangle,
   ExternalLink,
@@ -10,6 +10,7 @@ import {
   HelpCircle,
   Play,
   RefreshCw,
+  Rocket,
   ShieldCheck,
   Sparkles,
   Wrench,
@@ -17,6 +18,7 @@ import {
 import {
   analyzePullRequest,
   createDraftPrFromCodeChange,
+  createRelease,
   generatePrPatch,
   getErrorMessage,
   getPullRequest,
@@ -56,6 +58,7 @@ function PullRequestsInner() {
   );
 
   const [loading, setLoading] = useState(true);
+  const router = useRouter();
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -143,6 +146,24 @@ function PullRequestsInner() {
       setNotice(
         `Completed prompt-injection-hardened AI Risk Analysis for PR #${pr.github_pr_number}.`
       );
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const handleCreateRelease = async (pr: PullRequest) => {
+    setBusyAction("create-release");
+    setError(null);
+    try {
+      const detail = await createRelease({
+        pull_request_id: pr.id,
+        repository_id: pr.repository_id,
+        target_environment: "development",
+        ai_assist: true,
+      });
+      router.push(`/releases/${detail.release.id}`);
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -378,6 +399,15 @@ function PullRequestsInner() {
                     >
                       <Sparkles className="h-3.5 w-3.5" />
                       {busyAction === "analyze" ? "Analyzing..." : "Run AI PR Analysis"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={busyAction !== null}
+                      onClick={() => void handleCreateRelease(selectedPr)}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-50"
+                    >
+                      <Rocket className="h-3.5 w-3.5" />
+                      {busyAction === "create-release" ? "Creating..." : "Create Release"}
                     </button>
                   </div>
                 }

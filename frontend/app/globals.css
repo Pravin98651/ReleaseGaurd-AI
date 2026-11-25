@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
-:root {
+:root,
+html.dark {
   --bg-canvas: #090c12;
   --bg-sidebar: #0d1119;
   --bg-surface: #111622;
@@ -12,6 +13,22 @@
   --text-muted: #64748b;
   --accent-indigo: #6366f1;
   --accent-cyan: #06b6d4;
+  color-scheme: dark;
+}
+
+html.light {
+  --bg-canvas: #f8fafc;
+  --bg-sidebar: #ffffff;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f1f5f9;
+  --border-subtle: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #64748b;
+  --accent-indigo: #4f46e5;
+  --accent-cyan: #0891b2;
+  color-scheme: light;
 }
 
 @theme inline {
@@ -26,7 +43,196 @@ body {
   background-color: var(--bg-canvas);
   color: var(--text-primary);
   font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
-  color-scheme: dark;
+}
+
+/* Consistent light-mode surface, border, and typography mapping across all control-plane pages */
+html.light body,
+html.light .bg-\[\#090c12\],
+html.light .bg-\[\#090c12\]\/90,
+html.light .bg-\[\#0a0e16\] {
+  background-color: #f1f5f9 !important;
+  color: #0f172a;
+}
+
+html.light .bg-\[\#0d1119\],
+html.light .bg-\[\#0d1119\]\/70,
+html.light .bg-\[\#111622\],
+html.light .bg-\[\#111622\]\/80,
+html.light .bg-\[\#131926\],
+html.light .bg-\[\#161d2d\],
+html.light .bg-slate-900,
+html.light .bg-slate-900\/90,
+html.light .bg-slate-900\/70,
+html.light .bg-slate-900\/60,
+html.light .bg-slate-900\/50,
+html.light .bg-slate-900\/40 {
+  background-color: #ffffff !important;
+}
+
+html.light .bg-\[\#070a0f\],
+html.light .bg-\[\#0b0f17\],
+html.light .bg-\[\#0d121c\],
+html.light .bg-slate-950,
+html.light .bg-slate-950\/80,
+html.light .bg-slate-950\/60 {
+  background-color: #f8fafc !important;
+}
+
+html.light .bg-slate-800,
+html.light .bg-slate-800\/80,
+html.light .bg-slate-800\/70,
+html.light .bg-slate-800\/60,
+html.light .hover\:bg-\[\#151c2b\]:hover,
+html.light .hover\:bg-slate-900:hover,
+html.light .hover\:bg-slate-900\/60:hover,
+html.light .hover\:bg-slate-900\/50:hover,
+html.light .hover\:bg-slate-900\/40:hover,
+html.light .hover\:bg-slate-800:hover,
+html.light .hover\:bg-slate-800\/60:hover,
+html.light .hover\:bg-slate-800\/40:hover {
+  background-color: #e2e8f0 !important;
+}
+
+html.light .bg-amber-950\/20 {
+  background-color: #fffbeb !important;
+}
+
+html.light .bg-cyan-950\/20 {
+  background-color: #ecfeff !important;
+}
+
+html.light .bg-emerald-950\/20,
+html.light .bg-emerald-950\/30 {
+  background-color: #ecfdf5 !important;
+}
+
+html.light .bg-indigo-950\/20 {
+  background-color: #eef2ff !important;
+}
+
+html.light .bg-rose-950\/20,
+html.light .bg-rose-950\/30 {
+  background-color: #fff1f2 !important;
+}
+
+html.light .border-slate-800,
+html.light .border-slate-800\/90,
+html.light .border-slate-800\/80,
+html.light .border-slate-800\/70,
+html.light .border-slate-800\/60,
+html.light .divide-slate-800 > :not(:last-child),
+html.light .divide-slate-800\/80 > :not(:last-child),
+html.light .divide-slate-800\/70 > :not(:last-child) {
+  border-color: #e2e8f0 !important;
+}
+
+html.light .border-slate-700,
+html.light .border-slate-700\/90,
+html.light .border-slate-700\/80,
+html.light .border-slate-600,
+html.light .border-slate-600\/60,
+html.light .hover\:border-slate-700:hover,
+html.light .hover\:border-slate-500:hover {
+  border-color: #cbd5e1 !important;
+}
+
+html.light .text-slate-50,
+html.light .text-slate-100,
+html.light .text-slate-200 {
+  color: #0f172a !important;
+}
+
+html.light .text-slate-300 {
+  color: #1e293b !important;
+}
+
+html.light .text-slate-400,
+html.light .text-slate-500,
+html.light .text-slate-600 {
+  color: #475569 !important;
+}
+
+html.light .text-indigo-100,
+html.light .text-indigo-200,
+html.light .text-indigo-300,
+html.light .text-indigo-400 {
+  color: #3730a3 !important;
+}
+
+html.light .text-emerald-100,
+html.light .text-emerald-200,
+html.light .text-emerald-300,
+html.light .text-emerald-400 {
+  color: #065f46 !important;
+}
+
+html.light .text-amber-100,
+html.light .text-amber-200,
+html.light .text-amber-200\/80,
+html.light .text-amber-200\/90,
+html.light .text-amber-300,
+html.light .text-amber-400 {
+  color: #92400e !important;
+}
+
+html.light .text-rose-100,
+html.light .text-rose-200,
+html.light .text-rose-300,
+html.light .text-rose-400,
+html.light .text-red-200 {
+  color: #9f1239 !important;
+}
+
+html.light .text-sky-200,
+html.light .text-sky-300,
+html.light .text-sky-400,
+html.light .text-cyan-100,
+html.light .text-cyan-200,
+html.light .text-cyan-200\/90,
+html.light .text-cyan-300,
+html.light .text-cyan-400 {
+  color: #0369a1 !important;
+}
+
+html.light .text-orange-300 {
+  color: #c2410c !important;
+}
+
+html.light .text-purple-300 {
+  color: #7e22ce !important;
+}
+
+html.light .text-yellow-200 {
+  color: #a16207 !important;
+}
+
+html.light .hover\:text-slate-100:hover,
+html.light .hover\:text-slate-200:hover,
+html.light .hover\:text-white:not([class*="bg-indigo-"]):not([class*="bg-emerald-"]):not([class*="bg-sky-"]):hover,
+html.light .group:hover .group-hover\:text-slate-300 {
+  color: #0f172a !important;
+}
+
+html.light .hover\:text-indigo-200:hover,
+html.light .hover\:text-indigo-300:hover,
+html.light .group:hover .group-hover\:text-indigo-200 {
+  color: #3730a3 !important;
+}
+
+html.light .hover\:text-cyan-200:hover {
+  color: #0e7490 !important;
+}
+
+html.light input,
+html.light select,
+html.light textarea {
+  color: #0f172a;
+}
+
+html.light input::placeholder,
+html.light textarea::placeholder {
+  color: #64748b;
+  opacity: 1;
 }
 
 .tabular-nums {
@@ -40,14 +246,14 @@ body {
 }
 
 ::-webkit-scrollbar-track {
-  background: #0b0f17;
+  background: var(--bg-canvas);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #232d42;
+  background: var(--border-strong);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #33415c;
+  background: var(--text-muted);
 }

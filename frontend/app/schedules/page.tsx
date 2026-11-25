@@ -18,7 +18,6 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { AppShell } from "@/components/AppShell";
 import { EmptyState, LoadingSkeleton, MetricCard, PageHeader, SectionCard } from "@/components/ui/StatePrimitives";
 import { StatusBadge } from "@/components/StatusBadges";
 import {
@@ -358,8 +357,7 @@ export default function SchedulesPage() {
   }, [schedules, executions]);
 
   return (
-    <AppShell>
-      <div className="space-y-6">
+    <div className="space-y-6">
         <PageHeader
           title="Scheduled Automation"
           description="PostgreSQL-persisted recurring & one-time release engineering jobs with IANA timezone conversion, duplicate lease protection, retry policies, and immutable execution history."
@@ -949,6 +947,5 @@ export default function SchedulesPage() {
           )}
         </SectionCard>
       </div>
-    </AppShell>
   );
 }

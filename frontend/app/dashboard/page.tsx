@@ -428,6 +428,15 @@ export default function DashboardPage() {
                     highlight: m.releases.rollbacks_executed > 0 ? "amber" : undefined,
                   },
                   {
+                    label: "Active Lifecycles",
+                    value: m.releases.lifecycle_active_releases ?? 0,
+                  },
+                  {
+                    label: "Ready / Blocked",
+                    value: `${m.releases.lifecycle_ready_releases ?? 0} / ${m.releases.lifecycle_blocked_releases ?? 0}`,
+                    highlight: (m.releases.lifecycle_blocked_releases ?? 0) > 0 ? "rose" : "emerald",
+                  },
+                  {
                     label: "Success Rate",
                     value:
                       m.releases.release_success_rate !== null

@@ -6,7 +6,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import CHAR, ForeignKey, Index, String, Text, Uuid, func
+from sqlalchemy import CHAR, ForeignKey, Index, Integer, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, JSONBCompat, TZDateTime, utcnow
@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from app.models.agents import AgentTask
     from app.models.flags import RolloutHistory
     from app.models.identity import User
+    from app.models.releases import Release
 
 
 class Approval(Base):
@@ -33,12 +34,17 @@ class Approval(Base):
         Index("ix_approvals_status_expires", "status", "expires_at"),
         Index("ix_approvals_action_hash", "action_hash"),
         Index("ix_approvals_task", "agent_task_id"),
+        Index("ix_approvals_release", "release_id"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     agent_task_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("agent_tasks.id", ondelete="SET NULL"), nullable=True
     )
+    release_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("releases.id", ondelete="SET NULL"), nullable=True
+    )
+    release_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
     requested_by_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -78,6 +84,7 @@ class Approval(Base):
     )
 
     agent_task: Mapped[AgentTask | None] = relationship(back_populates="approvals")
+    release: Mapped[Release | None] = relationship(back_populates="approvals")
     requested_by: Mapped[User | None] = relationship(
         foreign_keys=[requested_by_id], back_populates="requested_approvals"
     )

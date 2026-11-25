@@ -775,6 +775,12 @@ export interface DashboardMetrics {
     rollbacks_executed: number;
     releases_awaiting_approval: number;
     release_success_rate: number | null;
+    lifecycle_total_releases?: number;
+    lifecycle_active_releases?: number;
+    lifecycle_ready_releases?: number;
+    lifecycle_blocked_releases?: number;
+    lifecycle_completed_releases?: number;
+    lifecycle_avg_readiness_score?: number | null;
     trends?: Record<string, MetricTrend>;
   };
   feature_flags: {
@@ -1093,4 +1099,1151 @@ export interface DeepSystemHealth {
     backend: { status: string; http_status?: number; latency_ms?: number | null; url?: string; error?: string };
     frontend: { status: string; http_status?: number; latency_ms?: number | null; url?: string; error?: string };
   };
+}
+
+export type ReleaseStatus =
+  | "draft"
+  | "initializing"
+  | "analyzing"
+  | "awaiting_patch"
+  | "validating"
+  | "ready_for_flag"
+  | "flag_provisioning"
+  | "experiment_running"
+  | "awaiting_approval"
+  | "approved"
+  | "rolling_out"
+  | "monitoring"
+  | "completed"
+  | "paused"
+  | "blocked"
+  | "failed"
+  | "rolled_back"
+  | "cancelled";
+
+export type ReleaseType =
+  | "feature"
+  | "hotfix"
+  | "experiment"
+  | "config"
+  | "rollback_recovery";
+
+export type ReleaseStageKey =
+  | "draft"
+  | "pr_analysis"
+  | "patch_validation"
+  | "flag_setup"
+  | "experiment_monitoring"
+  | "approval_gate"
+  | "rollout_execution"
+  | "post_release_verification"
+  | "completed";
+
+export type ReleaseStageStatus =
+  | "pending"
+  | "in_progress"
+  | "waiting"
+  | "passed"
+  | "failed"
+  | "skipped"
+  | "blocked";
+
+export type ReleaseReadinessStatus =
+  | "ready"
+  | "needs_attention"
+  | "blocked"
+  | "not_ready";
+
+export type ReleaseCheckStatus =
+  | "passed"
+  | "failed"
+  | "warning"
+  | "pending"
+  | "skipped";
+
+export type ReleaseArtifactType =
+  | "pr_analysis"
+  | "code_patch"
+  | "validation_report"
+  | "flag_config"
+  | "experiment_report"
+  | "approval_snapshot"
+  | "release_report"
+  | "incident_report";
+
+export interface ReleaseStage {
+  id: string;
+  release_id: string;
+  stage_key: ReleaseStageKey;
+  stage_order: number;
+  title: string;
+  status: ReleaseStageStatus;
+  attempt_count: number;
+  max_attempts: number;
+  summary?: string | null;
+  details_json: Record<string, unknown>;
+  error_message?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReleaseEvent {
+  id: string;
+  release_id: string;
+  event_type: string;
+  from_status?: ReleaseStatus | null;
+  to_status?: ReleaseStatus | null;
+  stage_key?: ReleaseStageKey | null;
+  actor_id?: string | null;
+  actor_type: string;
+  title: string;
+  message?: string | null;
+  payload_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ReleaseArtifact {
+  id: string;
+  release_id: string;
+  artifact_type: ReleaseArtifactType;
+  title: string;
+  source_table?: string | null;
+  source_id?: string | null;
+  uri?: string | null;
+  summary?: string | null;
+  content_json: Record<string, unknown>;
+  created_by_id?: string | null;
+  created_at: string;
+}
+
+export interface ReleaseCheck {
+  id: string;
+  release_id: string;
+  check_key: string;
+  category: string;
+  title: string;
+  status: ReleaseCheckStatus;
+  is_blocking: boolean;
+  weight: number;
+  message?: string | null;
+  details_json: Record<string, unknown>;
+  evaluated_at?: string | null;
+}
+
+export interface ReleaseReadinessSummary {
+  score?: number;
+  status?: ReleaseReadinessStatus;
+  blocking_issues?: string[];
+  missing_checks?: string[];
+  warnings?: string[];
+  passed_checks?: string[];
+  failed_checks?: string[];
+  recommended_actions?: string[];
+  evaluated_at?: string;
+}
+
+export interface ReleaseRecord {
+  id: string;
+  release_key: string;
+  title: string;
+  description?: string | null;
+  release_type: ReleaseType;
+  target_environment: string;
+  status: ReleaseStatus;
+  previous_status?: ReleaseStatus | null;
+  version: number;
+  repository_id?: string | null;
+  pull_request_id?: string | null;
+  feature_flag_id?: string | null;
+  experiment_id?: string | null;
+  owner_id?: string | null;
+  created_by_id?: string | null;
+  risk_level: RiskLevel;
+  readiness_score: number;
+  readiness_status: ReleaseReadinessStatus;
+  readiness_summary: ReleaseReadinessSummary;
+  target_rollout_percentage: number;
+  current_rollout_percentage: number;
+  ai_summary?: string | null;
+  metadata_json: Record<string, unknown>;
+  error_message?: string | null;
+  scheduled_for?: string | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  paused_at?: string | null;
+  cancelled_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReleaseDetail {
+  release: ReleaseRecord;
+  stages: ReleaseStage[];
+  checks: ReleaseCheck[];
+  events: ReleaseEvent[];
+  artifacts: ReleaseArtifact[];
+  approvals: Approval[];
+}
+
+export interface ReleaseCreateInput {
+  title?: string;
+  description?: string;
+  release_type?: ReleaseType;
+  target_environment?: string;
+  repository_id?: string;
+  pull_request_id?: string;
+  feature_flag_id?: string;
+  experiment_id?: string;
+  risk_level?: RiskLevel;
+  target_rollout_percentage?: number;
+  scheduled_for?: string;
+  ai_assist?: boolean;
+  allow_duplicate?: boolean;
+}
+
+export interface ReleaseUpdateInput {
+  expected_version: number;
+  title?: string;
+  description?: string;
+  target_environment?: string;
+  feature_flag_id?: string;
+  experiment_id?: string;
+  risk_level?: RiskLevel;
+  target_rollout_percentage?: number;
+  scheduled_for?: string;
+}
+
+export type AgentExecutionStatus =
+  | "queued"
+  | "initializing"
+  | "planning"
+  | "running"
+  | "tool_running"
+  | "waiting_for_approval"
+  | "waiting_for_input"
+  | "pause_requested"
+  | "paused"
+  | "resuming"
+  | "retrying"
+  | "completed"
+  | "failed"
+  | "cancellation_requested"
+  | "cancelled"
+  | "timed_out"
+  | "interrupted"
+  | "recovering";
+
+export type AgentStepStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped"
+  | "paused"
+  | "cancelled";
+
+export type AgentToolCallStatus =
+  | "running"
+  | "completed"
+  | "failed"
+  | "timed_out"
+  | "cancelled";
+
+export type AgentDecisionSource =
+  | "ai_recommendation"
+  | "deterministic_rule"
+  | "verified_fact"
+  | "human_decision";
+
+export type AgentDecisionStatus = "pending" | "accepted" | "rejected" | "superseded";
+
+export interface AgentExecutionStep {
+  id: string;
+  execution_id: string;
+  step_key: string;
+  step_name: string;
+  step_type: string;
+  sequence: number;
+  status: AgentStepStatus;
+  description?: string | null;
+  input_summary: Record<string, unknown>;
+  output_summary: Record<string, unknown>;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_ms?: number | null;
+  retry_count: number;
+  error_details?: string | null;
+  created_at: string;
+}
+
+export interface AgentToolCall {
+  id: string;
+  execution_id: string;
+  step_id?: string | null;
+  tool_name: string;
+  tool_category: string;
+  invocation_id: string;
+  status: AgentToolCallStatus;
+  is_reversible: boolean;
+  input_summary: Record<string, unknown>;
+  output_summary: Record<string, unknown>;
+  started_at?: string | null;
+  completed_at?: string | null;
+  duration_ms?: number | null;
+  retry_count: number;
+  error_code?: string | null;
+  error_message?: string | null;
+  created_at: string;
+}
+
+export interface AgentDecision {
+  id: string;
+  execution_id: string;
+  step_id?: string | null;
+  decision_type: string;
+  decision_source: AgentDecisionSource;
+  decision_summary: string;
+  recommendation?: string | null;
+  confidence?: number | null;
+  decision_status: AgentDecisionStatus;
+  supporting_evidence: string[];
+  evidence_references: Array<Record<string, unknown>>;
+  model_name?: string | null;
+  created_at: string;
+}
+
+export interface AgentExecutionTrace {
+  id: string;
+  execution_id: string;
+  sequence_number: number;
+  event_type: string;
+  category: string;
+  stage?: string | null;
+  actor_type: string;
+  actor_id?: string | null;
+  message: string;
+  payload: Record<string, unknown>;
+  correlation_id: string;
+  created_at: string;
+}
+
+export interface AgentExecutionSnapshot {
+  id: string;
+  execution_id: string;
+  checkpoint_number: number;
+  checkpoint_type: string;
+  resumable_state: AgentExecutionStatus;
+  current_step_id?: string | null;
+  completed_step_ids: string[];
+  pending_operation?: string | null;
+  context_reference: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface AgentExecutionRecord {
+  id: string;
+  execution_key: string;
+  agent_type: string;
+  agent_name: string;
+  task_name: string;
+  task_description?: string | null;
+  status: AgentExecutionStatus;
+  previous_status?: AgentExecutionStatus | null;
+  priority: number;
+  execution_mode: string;
+  initiated_by_id?: string | null;
+  actor_type: string;
+  agent_task_id?: string | null;
+  repository_id?: string | null;
+  pull_request_id?: string | null;
+  release_id?: string | null;
+  experiment_id?: string | null;
+  schedule_id?: string | null;
+  parent_execution_id?: string | null;
+  current_stage?: string | null;
+  current_activity?: string | null;
+  completed_steps: number;
+  total_steps?: number | null;
+  started_at?: string | null;
+  completed_at?: string | null;
+  last_heartbeat_at?: string | null;
+  timeout_at?: string | null;
+  duration_ms?: number | null;
+  error_code?: string | null;
+  error_message?: string | null;
+  retry_count: number;
+  max_retries: number;
+  pause_requested: boolean;
+  cancel_requested: boolean;
+  correlation_id: string;
+  execution_metadata: Record<string, unknown>;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentExecutionDetail {
+  execution: AgentExecutionRecord;
+  steps: AgentExecutionStep[];
+  tool_calls: AgentToolCall[];
+  decisions: AgentDecision[];
+  traces: AgentExecutionTrace[];
+  checkpoints: AgentExecutionSnapshot[];
+  approvals: Approval[];
+}
+
+export interface AgentExecutionOverview {
+  total_executions: number;
+  active_executions: number;
+  queued_executions: number;
+  waiting_for_approval: number;
+  paused_executions: number;
+  failed_executions: number;
+  completed_executions: number;
+  average_duration_ms?: number | null;
+  tool_failure_rate?: number | null;
+  total_tool_calls: number;
+  failed_tool_calls: number;
+}
+
+export type RiskClassification = "low" | "moderate" | "elevated" | "high" | "critical";
+export type RiskAssessmentStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "outdated";
+export type MitigationStatus = "pending" | "accepted" | "rejected" | "completed";
+
+export interface RiskDimensionResult {
+  id: string;
+  assessment_id: string;
+  dimension_key: string;
+  dimension_name: string;
+  score?: number | null;
+  weight: number;
+  weighted_contribution?: number | null;
+  severity: RiskClassification;
+  status: string;
+  data_sufficiency: string;
+  evidence_quality: string;
+  explanations: string[];
+  limitations: string[];
+  details_json: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface RiskFinding {
+  id: string;
+  assessment_id: string;
+  dimension_key: string;
+  finding_type: string;
+  title: string;
+  description: string;
+  severity: RiskClassification;
+  is_ai_inferred: boolean;
+  affected_module?: string | null;
+  source_reference?: string | null;
+  evidence_summary?: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface RiskEvidence {
+  id: string;
+  assessment_id: string;
+  finding_id?: string | null;
+  evidence_type: string;
+  source_type: string;
+  source_reference: string;
+  title: string;
+  summary: string;
+  structured_data: Record<string, unknown>;
+  collected_at: string;
+}
+
+export interface RiskMitigation {
+  id: string;
+  assessment_id: string;
+  finding_id?: string | null;
+  dimension_key: string;
+  title: string;
+  description: string;
+  priority: RiskClassification;
+  mitigation_type: string;
+  status: MitigationStatus;
+  required: boolean;
+  suggested_role?: string | null;
+  verification_criteria?: string | null;
+  verification_evidence?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RiskScenario {
+  id: string;
+  assessment_id: string;
+  title: string;
+  description: string;
+  trigger_condition: string;
+  affected_component: string;
+  potential_impact: string;
+  severity: RiskClassification;
+  likelihood?: string | null;
+  is_potential: boolean;
+  supporting_evidence: string[];
+  detection_strategy?: string | null;
+  mitigation_summary?: string | null;
+  related_dimensions: string[];
+  created_at: string;
+}
+
+export interface ReleaseRiskAssessmentRecord {
+  id: string;
+  assessment_key: string;
+  release_id?: string | null;
+  pull_request_id?: string | null;
+  repository_id?: string | null;
+  execution_id?: string | null;
+  target_environment: string;
+  commit_sha?: string | null;
+  release_version?: number | null;
+  assessment_status: RiskAssessmentStatus;
+  is_current: boolean;
+  risk_score?: number | null;
+  risk_level: RiskClassification;
+  assessment_confidence?: number | null;
+  data_completeness: number;
+  flag_suitability: string;
+  scoring_version: number;
+  analyzer_version: string;
+  evaluated_dimensions: string[];
+  unavailable_dimensions: string[];
+  limitations: string[];
+  critical_overrides: string[];
+  evidence_summary: Record<string, unknown>;
+  dependency_graph: Record<string, unknown>;
+  ai_interpretation?: string | null;
+  fallback_mode: boolean;
+  completed_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RiskAssessmentDetail {
+  assessment: ReleaseRiskAssessmentRecord;
+  dimensions: RiskDimensionResult[];
+  findings: RiskFinding[];
+  evidence: RiskEvidence[];
+  mitigations: RiskMitigation[];
+  scenarios: RiskScenario[];
+}
+
+export type ProgressiveRolloutStatus =
+  | "draft"
+  | "ready"
+  | "awaiting_approval"
+  | "observing"
+  | "evaluating"
+  | "advance_recommended"
+  | "paused"
+  | "rollback_recommended"
+  | "awaiting_rollback_approval"
+  | "rolling_back"
+  | "rolled_back"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type ProgressiveStageStatus =
+  | "pending"
+  | "awaiting_approval"
+  | "active"
+  | "observing"
+  | "evaluating"
+  | "passed"
+  | "paused"
+  | "failed"
+  | "rolled_back"
+  | "skipped";
+
+export type GuardrailEvalStatus =
+  | "pass"
+  | "warning"
+  | "breach"
+  | "insufficient_data"
+  | "stale_data";
+
+export type RolloutDecisionType =
+  | "advance_recommended"
+  | "continue_observation"
+  | "pause_recommended"
+  | "rollback_recommended"
+  | "manual_review_required"
+  | "blocked"
+  | "completed";
+
+export type RollbackOperationStatus =
+  | "pending"
+  | "awaiting_approval"
+  | "executing"
+  | "completed"
+  | "verified"
+  | "failed";
+
+export interface ProgressiveRolloutStage {
+  id: string;
+  rollout_id: string;
+  stage_number: number;
+  target_percentage: number;
+  status: ProgressiveStageStatus;
+  observation_started_at?: string | null;
+  observation_ends_at?: string | null;
+  minimum_observation_seconds: number;
+  maximum_observation_seconds: number;
+  minimum_sample_size: number;
+  actual_sample_size: number;
+  healthy_evaluations_count: number;
+  activated_at?: string | null;
+  completed_at?: string | null;
+  evaluation_status?: string | null;
+  decision?: RolloutDecisionType | null;
+  approval_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RolloutMetricSnapshot {
+  id: string;
+  rollout_id: string;
+  stage_id?: string | null;
+  metric_key: string;
+  metric_value: number;
+  sample_size: number;
+  numerator?: number | null;
+  denominator?: number | null;
+  unit: string;
+  window_start: string;
+  window_end: string;
+  data_source: string;
+  freshness_status: string;
+  created_at: string;
+}
+
+export interface RolloutGuardrail {
+  id: string;
+  rollout_id: string;
+  metric_key: string;
+  operator: string;
+  threshold: number;
+  severity: RiskClassification;
+  evaluation_window_seconds: number;
+  minimum_sample_size: number;
+  consecutive_breach_count: number;
+  current_breach_streak: number;
+  action: string;
+  enabled: boolean;
+  created_at: string;
+}
+
+export interface GuardrailEvaluation {
+  id: string;
+  rollout_id: string;
+  stage_id?: string | null;
+  guardrail_id: string;
+  observed_value?: number | null;
+  threshold: number;
+  sample_size: number;
+  status: GuardrailEvalStatus;
+  severity: RiskClassification;
+  evidence: Record<string, unknown>;
+  evaluated_at: string;
+}
+
+export interface RolloutDecision {
+  id: string;
+  rollout_id: string;
+  stage_id?: string | null;
+  decision_type: RolloutDecisionType;
+  decision_summary: string;
+  supporting_evidence: string[];
+  missing_evidence: string[];
+  recommended_action?: string | null;
+  decision_source: string;
+  created_at: string;
+}
+
+export interface ProgressiveRolloutEvent {
+  id: string;
+  rollout_id: string;
+  stage_id?: string | null;
+  event_type: string;
+  actor_type: string;
+  actor_id?: string | null;
+  message: string;
+  structured_data: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface RollbackOperation {
+  id: string;
+  rollout_id: string;
+  stage_id?: string | null;
+  feature_flag_id: string;
+  environment: string;
+  previous_configuration: Record<string, unknown>;
+  requested_configuration: Record<string, unknown>;
+  status: RollbackOperationStatus;
+  reason: string;
+  approval_id?: string | null;
+  verification_result: Record<string, unknown>;
+  started_at?: string | null;
+  completed_at?: string | null;
+  created_at: string;
+}
+
+export interface ProgressiveRolloutRecord {
+  id: string;
+  rollout_key: string;
+  name: string;
+  description?: string | null;
+  release_id?: string | null;
+  repository_id?: string | null;
+  pull_request_id?: string | null;
+  commit_sha?: string | null;
+  feature_flag_id: string;
+  feature_flag_key: string;
+  experiment_id?: string | null;
+  environment: string;
+  status: ProgressiveRolloutStatus;
+  current_stage_id?: string | null;
+  current_percentage: number;
+  target_percentage: number;
+  primary_metric_key: string;
+  rollout_configuration: Record<string, unknown>;
+  observation_configuration: Record<string, unknown>;
+  rollback_configuration: Record<string, unknown>;
+  started_at?: string | null;
+  completed_at?: string | null;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProgressiveRolloutDetail {
+  rollout: ProgressiveRolloutRecord;
+  stages: ProgressiveRolloutStage[];
+  guardrails: RolloutGuardrail[];
+  metrics: RolloutMetricSnapshot[];
+  evaluations: GuardrailEvaluation[];
+  decisions: RolloutDecision[];
+  events: ProgressiveRolloutEvent[];
+  rollbacks: RollbackOperation[];
+}
+
+export interface ProgressiveRolloutCreateInput {
+  name: string;
+  description?: string | null;
+  feature_flag_id: string;
+  environment?: string;
+  release_id?: string | null;
+  experiment_id?: string | null;
+  stage_percentages?: number[] | null;
+  primary_metric_key?: string;
+  observation_config?: Record<string, unknown> | null;
+  guardrails?: Array<Record<string, unknown>> | null;
+}
+
+// Phase 5: Release Intelligence & Learning Engine
+export type PolicyReviewStatus =
+  | "pending_review"
+  | "accepted"
+  | "rejected"
+  | "modified"
+  | "implemented"
+  | "verified"
+  | "superseded";
+
+export type RecommendationOutcomeClass =
+  | "verified_benefit"
+  | "observed_positive_outcome"
+  | "no_measurable_impact"
+  | "negative_outcome"
+  | "inconclusive"
+  | "not_evaluable";
+
+export interface ReleaseFailurePattern {
+  id: string;
+  pattern_key: string;
+  name: string;
+  description: string;
+  category: string;
+  repository_id?: string | null;
+  affected_module?: string | null;
+  dependency_reference?: string | null;
+  sample_size: number;
+  failure_count: number;
+  observed_rate: number;
+  evidence_quality: string;
+  is_exploratory: boolean;
+  confidence_data: Record<string, unknown>;
+  supporting_release_ids: string[];
+  recommended_mitigation?: string | null;
+  first_observed_at?: string | null;
+  last_observed_at?: string | null;
+  last_analyzed_at: string;
+}
+
+export interface RepositoryIntelligenceProfile {
+  id: string;
+  repository_id: string;
+  repository_name?: string | null;
+  release_count: number;
+  failure_count: number;
+  rollback_count: number;
+  historical_failure_rate: number;
+  avg_recovery_seconds?: number | null;
+  common_failure_categories: Array<{ category: string; count: number }>;
+  high_risk_modules: Array<{
+    module: string;
+    release_count: number;
+    failure_count: number;
+    failure_rate: number;
+  }>;
+  dependency_patterns: Array<Record<string, unknown>>;
+  risk_indicators: Record<string, unknown>;
+  recommendations: Array<{
+    title: string;
+    rationale: string;
+    policy_area: string;
+  }>;
+  last_analyzed_at: string;
+  version: number;
+}
+
+export interface DependencyIntelligenceItem {
+  dependency: string;
+  release_count: number;
+  failure_count: number;
+  rollback_count: number;
+  failure_rate: number;
+  repositories: string[];
+  release_ids: string[];
+  recommendation: string;
+}
+
+export interface RecommendationOutcomeRecord {
+  id: string;
+  recommendation_id: string;
+  release_id?: string | null;
+  repository_id?: string | null;
+  recommendation_category: string;
+  outcome_classification: RecommendationOutcomeClass;
+  accepted?: boolean | null;
+  implemented: boolean;
+  verified: boolean;
+  actual_outcome?: string | null;
+  evidence: Record<string, unknown>;
+  evaluation_method: string;
+  evaluated_at: string;
+}
+
+export interface RecommendationAccuracyMetrics {
+  total_recommendations: number;
+  responded_count: number;
+  accepted_count: number;
+  rejected_count: number;
+  implemented_count: number;
+  verified_count: number;
+  evaluable_count: number;
+  positive_outcome_count: number;
+  negative_outcome_count: number;
+  inconclusive_or_not_evaluable_count: number;
+  acceptance_rate?: number | null;
+  implementation_rate?: number | null;
+  verification_rate?: number | null;
+  positive_outcome_rate?: number | null;
+  by_category: Record<string, { total: number; accepted: number; positive: number; negative: number }>;
+  by_model: Record<string, { total: number; accepted: number; positive: number; negative: number }>;
+  by_agent: Record<string, { total: number; accepted: number; positive: number; negative: number }>;
+  methodology_note: string;
+}
+
+export interface PolicyRecommendationRecord {
+  id: string;
+  title: string;
+  description: string;
+  policy_area: string;
+  current_configuration: Record<string, unknown>;
+  proposed_configuration: Record<string, unknown>;
+  approved_configuration?: Record<string, unknown> | null;
+  supporting_evidence: Record<string, unknown>;
+  affected_repositories: string[];
+  expected_benefit?: string | null;
+  tradeoffs?: string | null;
+  confidence_data: Record<string, unknown>;
+  review_status: PolicyReviewStatus;
+  reviewer_id?: string | null;
+  review_notes?: string | null;
+  approval_id?: string | null;
+  reviewed_at?: string | null;
+  implemented_at?: string | null;
+  verified_at?: string | null;
+  verification_evidence: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReleaseInsightRecord {
+  id: string;
+  insight_key: string;
+  title: string;
+  description: string;
+  insight_category: string;
+  evidence: Record<string, unknown>;
+  evidence_classification: string;
+  affected_repositories: string[];
+  affected_releases: string[];
+  sample_size: number;
+  confidence_data: Record<string, unknown>;
+  severity: RiskClassification;
+  status: string;
+  generated_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IntelligencePerformanceMetrics {
+  window_days: number;
+  total_records: number;
+  qualifying_releases: number;
+  successful_releases: number;
+  failed_releases: number;
+  rolled_back_releases: number;
+  verified_outcomes: number;
+  incomplete_outcomes: number;
+  deployment_frequency_per_week: number;
+  change_failure_rate?: number | null;
+  change_failure_rate_ci: Record<string, unknown>;
+  rollback_rate?: number | null;
+  release_success_rate?: number | null;
+  mean_time_to_recovery_seconds?: number | null;
+  lead_time_seconds?: number | null;
+  approval_latency_seconds?: number | null;
+  guardrail_breach_rate?: number | null;
+  guardrail_evaluations_count: number;
+  data_sufficiency: string;
+  definitions: Record<string, string>;
+}
+
+export interface IntelligenceOverview {
+  performance: IntelligencePerformanceMetrics;
+  trend_direction: string;
+  previous_period: Record<string, unknown>;
+  rollback_summary: {
+    total_rollbacks: number;
+    top_causes: Array<{ category: string; count: number }>;
+    avg_recovery_seconds?: number | null;
+  };
+  recommendation_accuracy: RecommendationAccuracyMetrics;
+  top_patterns: ReleaseFailurePattern[];
+  insights: ReleaseInsightRecord[];
+  pending_policy_recommendations: number;
+}
+
+export interface IntelligenceKnowledgeResponse {
+  question: string;
+  direct_answer: string;
+  supporting_evidence: {
+    window_days: number;
+    qualifying_releases: number;
+    sample_size: number;
+    references: Array<Record<string, unknown>>;
+  };
+  relevant_releases: Array<{ id: string; release_key: string; title: string; status: string }>;
+  observed_pattern: string;
+  confidence_and_limitations: string[];
+  recommended_action: string;
+  evidence_classification: string;
+}
+
+export interface IntelligenceAnalysisRun {
+  id: string;
+  analysis_type: string;
+  scope: Record<string, unknown>;
+  status: string;
+  input_record_count: number;
+  output_record_count: number;
+  summary: Record<string, unknown>;
+  error?: string | null;
+  model_version?: string | null;
+  analysis_version: string;
+  started_at: string;
+  completed_at?: string | null;
+}
+
+// Phase 6: Developer Experience Integration
+export interface GitHubInstallationRecord {
+  id: string;
+  installation_id: number;
+  account_login: string;
+  account_type: string;
+  repository_selection: string;
+  repositories: Array<Record<string, unknown>>;
+  permissions: Record<string, string>;
+  status: string;
+  token_expires_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GitHubWebhookEventRecord {
+  id: string;
+  delivery_id: string;
+  event_type: string;
+  action?: string | null;
+  installation_id?: number | null;
+  repository_id?: string | null;
+  pr_number?: number | null;
+  commit_sha?: string | null;
+  signature_verified: boolean;
+  processing_status: string;
+  retry_count: number;
+  error_message?: string | null;
+  correlation_id: string;
+  payload_summary: Record<string, unknown>;
+  received_at: string;
+  processed_at?: string | null;
+}
+
+export interface NotificationDeliveryRecord {
+  id: string;
+  provider: string;
+  channel_target: string;
+  event_type: string;
+  severity: string;
+  status: string;
+  retry_count: number;
+  response_status?: number | null;
+  error_message?: string | null;
+  sent_at?: string | null;
+  created_at: string;
+}
+
+export interface NotificationIntegrationSummary {
+  connections: Array<{
+    id: string;
+    provider: string;
+    status: string;
+    account_label?: string | null;
+    token_hint?: string | null;
+    verified_at?: string | null;
+  }>;
+  deliveries: NotificationDeliveryRecord[];
+}
+
+export interface ReleaseReadinessReportRecord {
+  id: string;
+  release_id: string;
+  report_key: string;
+  title: string;
+  readiness_outcome: string;
+  report_data: Record<string, unknown>;
+  markdown_content: string;
+  created_by_id?: string | null;
+  created_at: string;
+}
+
+export interface ShareableReportRecord {
+  id: string;
+  report_id: string;
+  expires_at: string;
+  revoked_at?: string | null;
+  access_count: number;
+  last_accessed_at?: string | null;
+  created_at: string;
+  share_token?: string | null;
+  share_url?: string | null;
+}
+
+// Phase 7: Multi-Repository Release Intelligence
+export interface OrganizationRecord {
+  id: string;
+  name: string;
+  slug: string;
+  github_org_id?: number | null;
+  settings: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OrganizationReleaseOverview {
+  organization_id: string;
+  total_repositories: number;
+  total_releases: number;
+  active_releases: number;
+  successful_releases: number;
+  failed_releases: number;
+  blocked_releases: number;
+  active_rollouts: number;
+  pending_approvals: number;
+  change_failure_rate?: number | null;
+}
+
+export interface DependencyGraphData {
+  nodes: string[];
+  edges: Array<{
+    id: string;
+    source_repository_id: string;
+    target_repository_id: string;
+    dependency_type: string;
+    version_constraint?: string | null;
+    verification_status: string;
+  }>;
+  recommended_order: string[];
+  has_cycles: boolean;
+}
+
+export interface CoordinatedReleasePlanRecord {
+  id: string;
+  organization_id: string;
+  name: string;
+  status: string;
+  risk_summary: Record<string, unknown>;
+  recommended_order: string[];
+  blocking_dependencies: Array<Record<string, unknown>>;
+  created_by_id?: string | null;
+  approved_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RepositoryHealthSnapshotRecord {
+  id: string;
+  repository_id: string;
+  health_score?: number | null;
+  health_category: string;
+  evidence: Record<string, unknown>;
+  sample_size: number;
+  data_completeness: number;
+  calculated_at: string;
+}
+
+export interface OrganizationReleasePolicyRecord {
+  id: string;
+  organization_id: string;
+  name: string;
+  policy_type: string;
+  configuration: Record<string, unknown>;
+  is_mandatory: boolean;
+  version: number;
+  status: string;
+  created_by_id?: string | null;
+  approved_by_id?: string | null;
+  created_at: string;
+  updated_at: string;
 }

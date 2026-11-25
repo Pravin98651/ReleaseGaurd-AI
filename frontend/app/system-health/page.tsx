@@ -15,7 +15,6 @@ import {
   ShoppingBag,
 } from "lucide-react";
 
-import { AppShell } from "@/components/AppShell";
 import { LoadingSkeleton, MetricCard, PageHeader, SectionCard } from "@/components/ui/StatePrimitives";
 import { StatusBadge } from "@/components/StatusBadges";
 import { getDeepSystemHealth, getSystemSchedulerStatus, getSystemWorkersStatus } from "@/lib/api";
@@ -62,8 +61,7 @@ export default function SystemHealthPage() {
   }, [loadData]);
 
   return (
-    <AppShell>
-      <div className="space-y-6">
+    <div className="space-y-6">
         <PageHeader
           title="System & Integration Health"
           description="Real-time operational diagnostics probing PostgreSQL latency, API error/latency counters, scheduler ticks, agent workers, external integrations, and NovaShop demo services."
@@ -328,6 +326,5 @@ export default function SystemHealthPage() {
           </>
         ) : null}
       </div>
-    </AppShell>
   );
 }

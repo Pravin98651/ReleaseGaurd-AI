@@ -1,4 +1,8 @@
 import type {
+  AgentExecutionDetail,
+  AgentExecutionOverview,
+  AgentExecutionRecord,
+  AgentExecutionStatus,
   AgentSession,
   AgentSpecialist,
   AgentTask,
@@ -9,23 +13,61 @@ import type {
   AuthUser,
   BranchInfo,
   CodeChange,
+  CoordinatedReleasePlanRecord,
   DashboardSummary,
+  DependencyGraphData,
+  DependencyIntelligenceItem,
   EventsSummaryResponse,
   Experiment,
   ExperimentAnalysis,
   ExperimentRecommendation,
   FeatureFlag,
   FlagHealthResponse,
+  GitHubInstallationRecord,
+  GitHubWebhookEventRecord,
   IncidentInvestigationResult,
   IntegrationConnection,
+  IntelligenceAnalysisRun,
+  IntelligenceKnowledgeResponse,
+  IntelligenceOverview,
   MutationOutcome,
+  NotificationIntegrationSummary,
+  OrganizationRecord,
+  OrganizationReleaseOverview,
+  OrganizationReleasePolicyRecord,
   PaginatedResponse,
+  PolicyRecommendationRecord,
+  PolicyReviewStatus,
+  ProgressiveRolloutCreateInput,
+  ProgressiveRolloutDetail,
+  ProgressiveRolloutRecord,
+  ProgressiveRolloutStatus,
   PullRequest,
+  RecommendationAccuracyMetrics,
+  RecommendationOutcomeRecord,
+  ReleaseCreateInput,
+  ReleaseDetail,
+  ReleaseEvent,
+  ReleaseFailurePattern,
+  ReleaseReadinessReportRecord,
+  ReleaseReadinessStatus,
+  ReleaseRecord,
+  ReleaseRiskAssessmentRecord,
+  ReleaseStatus,
+  ReleaseUpdateInput,
   ReleasesOverview,
   RepoScanResult,
   Repository,
+  RepositoryHealthSnapshotRecord,
+  RepositoryIntelligenceProfile,
+  RiskAssessmentDetail,
+  RiskLevel,
+  RiskMitigation,
+  RollbackOperation,
+  RolloutDecision,
   RolloutHistoryEntry,
   RolloutStage,
+  ShareableReportRecord,
   SystemHealth,
   WorkspaceSettings,
 } from "@/types/releaseguard";
@@ -625,6 +667,298 @@ export async function investigateReleaseIncident(body: {
     method: "POST",
     body: JSON.stringify(body),
   });
+  return data;
+}
+
+export async function listReleases(params?: {
+  q?: string;
+  status?: ReleaseStatus;
+  readiness_status?: ReleaseReadinessStatus;
+  environment?: string;
+  repository_id?: string;
+  risk_level?: RiskLevel;
+  sort_by?: string;
+  sort_dir?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
+}): Promise<PaginatedResponse<ReleaseRecord>> {
+  const { data } = await requestJson<PaginatedResponse<ReleaseRecord>>(
+    `/api/v1/releases${buildQuery(params)}`,
+  );
+  return data;
+}
+
+export async function createRelease(body: ReleaseCreateInput): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>("/api/v1/releases", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data;
+}
+
+export async function getReleaseDetail(releaseId: string): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>(`/api/v1/releases/${releaseId}`);
+  return data;
+}
+
+export async function updateRelease(
+  releaseId: string,
+  body: ReleaseUpdateInput,
+): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>(`/api/v1/releases/${releaseId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+  return data;
+}
+
+export async function analyzeRelease(releaseId: string): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>(`/api/v1/releases/${releaseId}/analyze`, {
+    method: "POST",
+  });
+  return data;
+}
+
+export async function validateRelease(releaseId: string): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>(`/api/v1/releases/${releaseId}/validate`, {
+    method: "POST",
+  });
+  return data;
+}
+
+export async function evaluateReleaseReadiness(releaseId: string): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>(
+    `/api/v1/releases/${releaseId}/readiness/evaluate`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function getReleaseTimeline(
+  releaseId: string,
+  params?: { event_type?: string; limit?: number },
+): Promise<ReleaseEvent[]> {
+  const { data } = await requestJson<ReleaseEvent[]>(
+    `/api/v1/releases/${releaseId}/timeline${buildQuery(params)}`,
+  );
+  return data;
+}
+
+export async function pauseRelease(
+  releaseId: string,
+  body?: { expected_version?: number; reason?: string },
+): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>(`/api/v1/releases/${releaseId}/pause`, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
+  return data;
+}
+
+export async function resumeRelease(
+  releaseId: string,
+  body?: { expected_version?: number },
+): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>(`/api/v1/releases/${releaseId}/resume`, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
+  return data;
+}
+
+export async function retryRelease(
+  releaseId: string,
+  body?: { expected_version?: number },
+): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>(`/api/v1/releases/${releaseId}/retry`, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
+  return data;
+}
+
+export async function cancelRelease(
+  releaseId: string,
+  body?: { expected_version?: number; reason?: string },
+): Promise<ReleaseDetail> {
+  const { data } = await requestJson<ReleaseDetail>(`/api/v1/releases/${releaseId}/cancel`, {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
+  return data;
+}
+
+export async function requestReleaseApproval(
+  releaseId: string,
+  rationale?: string,
+): Promise<Approval> {
+  const { data } = await requestJson<Approval>(
+    `/api/v1/releases/${releaseId}/approval-request`,
+    {
+      method: "POST",
+      body: JSON.stringify({ rationale }),
+    },
+  );
+  return data;
+}
+
+export function getReleaseReportExportUrl(releaseId: string): string {
+  return `${API_BASE_URL}/api/v1/releases/${releaseId}/report/export`;
+}
+
+export async function getExecutionOverview(): Promise<AgentExecutionOverview> {
+  const { data } = await requestJson<AgentExecutionOverview>("/api/v1/agent-executions/overview");
+  return data;
+}
+
+export async function listAgentExecutions(params?: {
+  q?: string;
+  agent_type?: string;
+  status?: AgentExecutionStatus;
+  repository_id?: string;
+  release_id?: string;
+  failed_only?: boolean;
+  scheduled_only?: boolean;
+  limit?: number;
+  offset?: number;
+}): Promise<PaginatedResponse<AgentExecutionRecord>> {
+  const { data } = await requestJson<PaginatedResponse<AgentExecutionRecord>>(
+    `/api/v1/agent-executions${buildQuery(params)}`,
+  );
+  return data;
+}
+
+export async function createAgentExecution(body: {
+  agent_type?: string;
+  agent_name?: string;
+  task_name: string;
+  task_description?: string;
+  repository_id?: string;
+  pull_request_id?: string;
+  release_id?: string;
+  start_immediately?: boolean;
+}): Promise<AgentExecutionDetail> {
+  const { data } = await requestJson<AgentExecutionDetail>("/api/v1/agent-executions", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data;
+}
+
+export async function getAgentExecutionDetail(executionId: string): Promise<AgentExecutionDetail> {
+  const { data } = await requestJson<AgentExecutionDetail>(
+    `/api/v1/agent-executions/${executionId}`,
+  );
+  return data;
+}
+
+export async function pauseAgentExecution(
+  executionId: string,
+  body?: { expected_version?: number; reason?: string },
+): Promise<AgentExecutionDetail> {
+  const { data } = await requestJson<AgentExecutionDetail>(
+    `/api/v1/agent-executions/${executionId}/pause`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export async function resumeAgentExecution(
+  executionId: string,
+  body?: { expected_version?: number },
+): Promise<AgentExecutionDetail> {
+  const { data } = await requestJson<AgentExecutionDetail>(
+    `/api/v1/agent-executions/${executionId}/resume`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export async function cancelAgentExecution(
+  executionId: string,
+  body?: { expected_version?: number; reason?: string },
+): Promise<AgentExecutionDetail> {
+  const { data } = await requestJson<AgentExecutionDetail>(
+    `/api/v1/agent-executions/${executionId}/cancel`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export async function retryAgentExecution(
+  executionId: string,
+  body?: { expected_version?: number },
+): Promise<AgentExecutionDetail> {
+  const { data } = await requestJson<AgentExecutionDetail>(
+    `/api/v1/agent-executions/${executionId}/retry`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export async function listRiskAssessments(params?: {
+  release_id?: string;
+  pull_request_id?: string;
+  repository_id?: string;
+  current_only?: boolean;
+  limit?: number;
+  offset?: number;
+}): Promise<PaginatedResponse<ReleaseRiskAssessmentRecord>> {
+  const { data } = await requestJson<PaginatedResponse<ReleaseRiskAssessmentRecord>>(
+    `/api/v1/risk-assessments${buildQuery(params)}`,
+  );
+  return data;
+}
+
+export async function createRiskAssessment(body: {
+  release_id?: string;
+  pull_request_id?: string;
+  repository_id?: string;
+  target_environment?: string;
+}): Promise<RiskAssessmentDetail> {
+  const { data } = await requestJson<RiskAssessmentDetail>("/api/v1/risk-assessments", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data;
+}
+
+export async function getRiskAssessmentDetail(assessmentId: string): Promise<RiskAssessmentDetail> {
+  const { data } = await requestJson<RiskAssessmentDetail>(
+    `/api/v1/risk-assessments/${assessmentId}`,
+  );
+  return data;
+}
+
+export async function reanalyzeRiskAssessment(assessmentId: string): Promise<RiskAssessmentDetail> {
+  const { data } = await requestJson<RiskAssessmentDetail>(
+    `/api/v1/risk-assessments/${assessmentId}/reanalyze`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function updateRiskMitigation(
+  assessmentId: string,
+  mitigationId: string,
+  body: { status?: string; verification_evidence?: string },
+): Promise<RiskMitigation> {
+  const { data } = await requestJson<RiskMitigation>(
+    `/api/v1/risk-assessments/${assessmentId}/mitigations/${mitigationId}`,
+    { method: "PATCH", body: JSON.stringify(body) },
+  );
+  return data;
+}
+
+export async function verifyRiskMitigation(
+  assessmentId: string,
+  mitigationId: string,
+  verification_evidence?: string,
+): Promise<RiskMitigation> {
+  const { data } = await requestJson<RiskMitigation>(
+    `/api/v1/risk-assessments/${assessmentId}/mitigations/${mitigationId}/verify`,
+    { method: "POST", body: JSON.stringify({ verification_evidence }) },
+  );
   return data;
 }
 
@@ -1348,5 +1682,482 @@ export async function getSystemSchedulerStatus(): Promise<{
     counts: Record<string, number>;
     upcoming: Array<Record<string, unknown>>;
   }>("/api/v1/system/scheduler");
+  return data;
+}
+
+// Progressive Delivery Engine (Phase 4)
+export async function listRollouts(params?: {
+  status?: ProgressiveRolloutStatus;
+  environment?: string;
+  release_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PaginatedResponse<ProgressiveRolloutRecord>> {
+  const { data } = await requestJson<PaginatedResponse<ProgressiveRolloutRecord>>(
+    `/api/v1/rollouts${buildQuery(params)}`,
+  );
+  return data;
+}
+
+export async function createRollout(
+  body: ProgressiveRolloutCreateInput,
+): Promise<ProgressiveRolloutDetail> {
+  const { data } = await requestJson<ProgressiveRolloutDetail>("/api/v1/rollouts", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data;
+}
+
+export async function getRolloutDetail(rolloutId: string): Promise<ProgressiveRolloutDetail> {
+  const { data } = await requestJson<ProgressiveRolloutDetail>(`/api/v1/rollouts/${rolloutId}`);
+  return data;
+}
+
+export async function validateRollout(
+  rolloutId: string,
+): Promise<{ valid: boolean; blockers: string[] }> {
+  const { data } = await requestJson<{ valid: boolean; blockers: string[] }>(
+    `/api/v1/rollouts/${rolloutId}/validate`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function startRollout(
+  rolloutId: string,
+  body?: { reason?: string; has_production_approval?: boolean },
+): Promise<ProgressiveRolloutDetail> {
+  const { data } = await requestJson<ProgressiveRolloutDetail>(
+    `/api/v1/rollouts/${rolloutId}/start`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export async function evaluateRolloutStage(
+  rolloutId: string,
+  stageId: string,
+): Promise<RolloutDecision> {
+  const { data } = await requestJson<RolloutDecision>(
+    `/api/v1/rollouts/${rolloutId}/stages/${stageId}/evaluate`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function advanceRolloutStage(
+  rolloutId: string,
+  stageId: string,
+  body?: { reason?: string; has_production_approval?: boolean },
+): Promise<ProgressiveRolloutDetail> {
+  const { data } = await requestJson<ProgressiveRolloutDetail>(
+    `/api/v1/rollouts/${rolloutId}/stages/${stageId}/advance`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export async function pauseRollout(
+  rolloutId: string,
+  body?: { reason?: string },
+): Promise<ProgressiveRolloutDetail> {
+  const { data } = await requestJson<ProgressiveRolloutDetail>(
+    `/api/v1/rollouts/${rolloutId}/pause`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export async function resumeRollout(rolloutId: string): Promise<ProgressiveRolloutDetail> {
+  const { data } = await requestJson<ProgressiveRolloutDetail>(
+    `/api/v1/rollouts/${rolloutId}/resume`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function cancelRollout(
+  rolloutId: string,
+  body?: { reason?: string },
+): Promise<ProgressiveRolloutDetail> {
+  const { data } = await requestJson<ProgressiveRolloutDetail>(
+    `/api/v1/rollouts/${rolloutId}/cancel`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export async function executeRolloutRollback(
+  rolloutId: string,
+  body?: { reason?: string; has_production_approval?: boolean },
+): Promise<RollbackOperation> {
+  const { data } = await requestJson<RollbackOperation>(
+    `/api/v1/rollouts/${rolloutId}/rollback/execute`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export function getRolloutStreamUrl(rolloutId: string, afterSeq = 0): string {
+  const tok = getStoredAuthToken();
+  return `${API_BASE_URL}/api/v1/rollouts/${rolloutId}/stream${buildQuery({
+    after_seq: afterSeq > 0 ? afterSeq : undefined,
+    token: tok || undefined,
+  })}`;
+}
+
+// Release Intelligence & Learning Engine (Phase 5)
+export async function getIntelligenceOverview(params?: {
+  days?: number;
+  environment?: string;
+  repository_id?: string;
+}): Promise<IntelligenceOverview> {
+  const { data } = await requestJson<IntelligenceOverview>(
+    `/api/v1/intelligence/overview${buildQuery(params)}`,
+  );
+  return data;
+}
+
+export async function triggerIntelligenceAnalysis(body?: {
+  analysis_type?: string;
+  repository_id?: string;
+}): Promise<IntelligenceAnalysisRun> {
+  const { data } = await requestJson<IntelligenceAnalysisRun>("/api/v1/intelligence/analyze", {
+    method: "POST",
+    body: JSON.stringify(body ?? {}),
+  });
+  return data;
+}
+
+export async function listFailurePatterns(params?: {
+  repository_id?: string;
+  category?: string;
+  limit?: number;
+}): Promise<PaginatedResponse<ReleaseFailurePattern>> {
+  const { data } = await requestJson<PaginatedResponse<ReleaseFailurePattern>>(
+    `/api/v1/intelligence/failure-patterns${buildQuery(params)}`,
+  );
+  return data;
+}
+
+export async function listRepositoryIntelligence(): Promise<
+  PaginatedResponse<RepositoryIntelligenceProfile>
+> {
+  const { data } = await requestJson<PaginatedResponse<RepositoryIntelligenceProfile>>(
+    "/api/v1/intelligence/repositories",
+  );
+  return data;
+}
+
+export async function getRepositoryIntelligence(
+  repositoryId: string,
+): Promise<RepositoryIntelligenceProfile> {
+  const { data } = await requestJson<RepositoryIntelligenceProfile>(
+    `/api/v1/intelligence/repositories/${repositoryId}`,
+  );
+  return data;
+}
+
+export async function listDependencyIntelligence(): Promise<{
+  items: DependencyIntelligenceItem[];
+  total: number;
+}> {
+  const { data } = await requestJson<{ items: DependencyIntelligenceItem[]; total: number }>(
+    "/api/v1/intelligence/dependencies",
+  );
+  return data;
+}
+
+export async function getRollbackAnalysis(category?: string): Promise<{
+  total_rollbacks: number;
+  top_causes: Array<{ category: string; count: number }>;
+  by_environment: Record<string, number>;
+  by_rollout_percentage: Record<string, number>;
+  avg_recovery_seconds?: number | null;
+  rollbacks: Array<Record<string, unknown>>;
+}> {
+  const { data } = await requestJson<{
+    total_rollbacks: number;
+    top_causes: Array<{ category: string; count: number }>;
+    by_environment: Record<string, number>;
+    by_rollout_percentage: Record<string, number>;
+    avg_recovery_seconds?: number | null;
+    rollbacks: Array<Record<string, unknown>>;
+  }>(`/api/v1/intelligence/rollback-analysis${buildQuery({ category })}`);
+  return data;
+}
+
+export async function getRecommendationAccuracy(
+  repository_id?: string,
+): Promise<RecommendationAccuracyMetrics> {
+  const { data } = await requestJson<RecommendationAccuracyMetrics>(
+    `/api/v1/intelligence/recommendations/accuracy${buildQuery({ repository_id })}`,
+  );
+  return data;
+}
+
+export async function listRecommendationOutcomes(): Promise<
+  PaginatedResponse<RecommendationOutcomeRecord>
+> {
+  const { data } = await requestJson<PaginatedResponse<RecommendationOutcomeRecord>>(
+    "/api/v1/intelligence/recommendations",
+  );
+  return data;
+}
+
+export async function listPolicyRecommendations(params?: {
+  review_status?: PolicyReviewStatus;
+}): Promise<PaginatedResponse<PolicyRecommendationRecord>> {
+  const { data } = await requestJson<PaginatedResponse<PolicyRecommendationRecord>>(
+    `/api/v1/intelligence/policy-recommendations${buildQuery(params)}`,
+  );
+  return data;
+}
+
+export async function reviewPolicyRecommendation(
+  recommendationId: string,
+  body: { decision: string; notes?: string; modified_configuration?: Record<string, unknown> },
+): Promise<PolicyRecommendationRecord> {
+  const { data } = await requestJson<PolicyRecommendationRecord>(
+    `/api/v1/intelligence/policy-recommendations/${recommendationId}/review`,
+    { method: "POST", body: JSON.stringify(body) },
+  );
+  return data;
+}
+
+export async function approvePolicyRecommendation(
+  recommendationId: string,
+  body?: { notes?: string },
+): Promise<PolicyRecommendationRecord> {
+  const { data } = await requestJson<PolicyRecommendationRecord>(
+    `/api/v1/intelligence/policy-recommendations/${recommendationId}/approve`,
+    { method: "POST", body: JSON.stringify(body ?? {}) },
+  );
+  return data;
+}
+
+export async function implementPolicyRecommendation(
+  recommendationId: string,
+): Promise<PolicyRecommendationRecord> {
+  const { data } = await requestJson<PolicyRecommendationRecord>(
+    `/api/v1/intelligence/policy-recommendations/${recommendationId}/implement`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function verifyPolicyRecommendation(
+  recommendationId: string,
+): Promise<PolicyRecommendationRecord> {
+  const { data } = await requestJson<PolicyRecommendationRecord>(
+    `/api/v1/intelligence/policy-recommendations/${recommendationId}/verify`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function queryReleaseKnowledgeBase(body: {
+  question: string;
+  repository_id?: string;
+}): Promise<IntelligenceKnowledgeResponse> {
+  const { data } = await requestJson<IntelligenceKnowledgeResponse>("/api/v1/intelligence/query", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data;
+}
+
+// Phase 6: Developer Experience Integration
+export async function listGitHubInstallations(): Promise<GitHubInstallationRecord[]> {
+  const { data } = await requestJson<GitHubInstallationRecord[]>(
+    "/api/v1/integrations/github/installations",
+  );
+  return data;
+}
+
+export async function listGitHubWebhookEvents(): Promise<GitHubWebhookEventRecord[]> {
+  const { data } = await requestJson<GitHubWebhookEventRecord[]>(
+    "/api/v1/integrations/github/events",
+  );
+  return data;
+}
+
+export async function retryGitHubWebhookEvent(
+  eventId: string,
+): Promise<GitHubWebhookEventRecord> {
+  const { data } = await requestJson<GitHubWebhookEventRecord>(
+    `/api/v1/integrations/github/events/${eventId}/retry`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function listNotificationIntegrations(): Promise<NotificationIntegrationSummary> {
+  const { data } = await requestJson<NotificationIntegrationSummary>(
+    "/api/v1/integrations/notifications",
+  );
+  return data;
+}
+
+export async function connectSlackWebhook(body: {
+  webhook_url: string;
+  channel_label: string;
+}): Promise<{ id: string; provider: string; status: string }> {
+  const { data } = await requestJson<{ id: string; provider: string; status: string }>(
+    "/api/v1/integrations/slack/connect",
+    { method: "POST", body: JSON.stringify(body) },
+  );
+  return data;
+}
+
+export async function connectDiscordWebhook(body: {
+  webhook_url: string;
+  channel_label: string;
+}): Promise<{ id: string; provider: string; status: string }> {
+  const { data } = await requestJson<{ id: string; provider: string; status: string }>(
+    "/api/v1/integrations/discord/connect",
+    { method: "POST", body: JSON.stringify(body) },
+  );
+  return data;
+}
+
+export async function generateReleaseReadinessReport(
+  releaseId: string,
+): Promise<ReleaseReadinessReportRecord> {
+  const { data } = await requestJson<ReleaseReadinessReportRecord>(
+    `/api/v1/releases/${releaseId}/reports`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function createReportShareLink(
+  reportId: string,
+  expiresInHours = 24,
+): Promise<ShareableReportRecord> {
+  const { data } = await requestJson<ShareableReportRecord>(`/api/v1/reports/${reportId}/share`, {
+    method: "POST",
+    body: JSON.stringify({ expires_in_hours: expiresInHours }),
+  });
+  return data;
+}
+
+export async function accessSharedReport(token: string): Promise<ReleaseReadinessReportRecord> {
+  const { data } = await requestJson<ReleaseReadinessReportRecord>(`/api/v1/shared/${token}`);
+  return data;
+}
+
+// Phase 7: Multi-Repository Release Intelligence
+export async function listOrganizations(): Promise<OrganizationRecord[]> {
+  const { data } = await requestJson<OrganizationRecord[]>("/api/v1/organizations");
+  return data;
+}
+
+export async function createOrganization(body: {
+  name: string;
+  slug: string;
+}): Promise<OrganizationRecord> {
+  const { data } = await requestJson<OrganizationRecord>("/api/v1/organizations", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data;
+}
+
+export async function getOrganizationReleaseOverview(
+  orgId: string,
+): Promise<OrganizationReleaseOverview> {
+  const { data } = await requestJson<OrganizationReleaseOverview>(
+    `/api/v1/organizations/${orgId}/release-overview`,
+  );
+  return data;
+}
+
+export async function getOrganizationDependencyGraph(
+  orgId: string,
+): Promise<DependencyGraphData> {
+  const { data } = await requestJson<DependencyGraphData>(
+    `/api/v1/organizations/${orgId}/dependency-graph`,
+  );
+  return data;
+}
+
+export async function listCoordinatedReleasePlans(
+  orgId: string,
+): Promise<CoordinatedReleasePlanRecord[]> {
+  const { data } = await requestJson<CoordinatedReleasePlanRecord[]>(
+    `/api/v1/organizations/${orgId}/coordinated-releases`,
+  );
+  return data;
+}
+
+export async function approveCoordinatedReleasePlan(
+  planId: string,
+): Promise<CoordinatedReleasePlanRecord> {
+  const { data } = await requestJson<CoordinatedReleasePlanRecord>(
+    `/api/v1/coordinated-releases/${planId}/approve`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function startCoordinatedReleasePlan(
+  planId: string,
+): Promise<CoordinatedReleasePlanRecord> {
+  const { data } = await requestJson<CoordinatedReleasePlanRecord>(
+    `/api/v1/coordinated-releases/${planId}/start`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function getOrganizationRepositoryRankings(
+  orgId: string,
+): Promise<RepositoryHealthSnapshotRecord[]> {
+  const { data } = await requestJson<RepositoryHealthSnapshotRecord[]>(
+    `/api/v1/organizations/${orgId}/repository-rankings`,
+  );
+  return data;
+}
+
+export async function listOrganizationPolicies(
+  orgId: string,
+): Promise<OrganizationReleasePolicyRecord[]> {
+  const { data } = await requestJson<OrganizationReleasePolicyRecord[]>(
+    `/api/v1/organizations/${orgId}/policies`,
+  );
+  return data;
+}
+
+export async function publishOrganizationPolicy(
+  orgId: string,
+  policyId: string,
+): Promise<OrganizationReleasePolicyRecord> {
+  const { data } = await requestJson<OrganizationReleasePolicyRecord>(
+    `/api/v1/organizations/${orgId}/policies/${policyId}/publish`,
+    { method: "POST" },
+  );
+  return data;
+}
+
+export async function queryOrganizationIntelligence(
+  orgId: string,
+  question: string,
+): Promise<{
+  organization_id: string;
+  question: string;
+  direct_answer: string;
+  supporting_evidence: Record<string, unknown>;
+}> {
+  const { data } = await requestJson<{
+    organization_id: string;
+    question: string;
+    direct_answer: string;
+    supporting_evidence: Record<string, unknown>;
+  }>(`/api/v1/organizations/${orgId}/intelligence/query`, {
+    method: "POST",
+    body: JSON.stringify({ question }),
+  });
   return data;
 }

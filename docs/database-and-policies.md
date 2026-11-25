@@ -505,3 +505,84 @@ Exact execution algorithm inside `POST /api/v1/approvals/{approval_id}/approve`:
 5. **Post-Mutation State Verification**: Read back live Flagsmith/GitHub state and verify target invariants match.
    - If verified -> update `approvals.status = 'executed'`, `executed_at = now()`, record `rollout_history` (with `verified=True`) and `audit_logs(status='success')`, and resume LangGraph thread via `Command(resume={"decision": "approved", "approval_id": str(approval.id), "result": result})` if `agent_task_id` is linked.
    - If mismatch or API exception -> update `approvals.status = 'failed'`, record `audit_logs(status='failed')`, and surface clear error to operator.
+
+
+---
+
+## Release Lifecycle Tables (`0005_release_lifecycle`)
+
+- `releases`: End-to-end release record (`release_key`, 18-state `status`, optimistic `version`, FKs to `repositories`, `pull_requests`, `feature_flags`, `experiments`, `users`, plus `readiness_score`, `readiness_status`, `readiness_summary`).
+- `release_stages`: 9 ordered stages per release (`draft` through `completed`) with attempt counts and diagnostics.
+- `release_events`: Immutable chronological timeline of state transitions, checks, approvals, and recovery events.
+- `release_artifacts`: Evidence artifacts (PR analysis, code patches, validation reports, flag configs, experiment reports).
+- `release_checks`: Deterministic verification checks (`pr_analysis`, `patch_validation`, `flag_readiness`, `experiment_guardrails`, `approval_gate`).
+- `approvals`: Extended with nullable `release_id` and `release_version` for direct release binding and stale approval invalidation when material release properties change.
+
+
+---
+
+## Agent Command Center Tables (`0006_agent_command_center`)
+
+- `agent_executions`: Controllable execution record (`execution_key`, 18-state `status`, `version`, `correlation_id`, FKs to `agent_tasks`, `repositories`, `pull_requests`, `releases`, `experiments`, `scheduled_jobs`, `users`).
+- `agent_execution_steps`: Ordered stages with start/end timestamps, duration, and retry count.
+- `agent_tool_calls`: Instrumented tool invocations with pre-persistence secret redaction (`redact_dict` / `scrub_secrets`).
+- `agent_decisions`: Explainable decisions distinguishing `ai_recommendation`, `deterministic_rule`, `verified_fact`, and `human_decision`.
+- `agent_execution_traces`: Canonical ordered timeline events.
+- `agent_execution_snapshots`: Safe recoverable checkpoints without secrets or raw model reasoning.
+
+
+---
+
+## Intelligent Release Risk Engine Tables (`0007_intelligent_release_risk`)
+
+- `release_risk_assessments`: Versioned 7-dimension risk assessments (`assessment_key`, `commit_sha`, `release_version`, `risk_score`, `risk_level`, `data_completeness`, `assessment_confidence`, `flag_suitability`, `critical_overrides`).
+- `risk_dimension_results`: Per-dimension scores, weights, data sufficiency, and explanations.
+- `risk_findings` & `risk_evidence`: Traceable findings and source evidence.
+- `risk_mitigations`: Actionable recommendations with acceptance and verification tracking.
+- `risk_scenarios`: Potential failure scenarios grounded in findings (`is_potential=True`).
+- `risk_engine_configurations`: Versioned, audited scoring configuration.
+
+---
+
+## Progressive Delivery Engine Tables (`0008_progressive_delivery`)
+
+- `progressive_rollouts`: Master rollout orchestration (`rollout_key`, `feature_flag_id`, `release_id`, `experiment_id`, `environment`, `status`, `current_percentage`, `target_percentage`, `observation_configuration`, `version`).
+- `progressive_rollout_stages`: Ordered percentage stages (`stage_number`, `target_percentage`, `status`, `minimum_observation_seconds`, `minimum_sample_size`, `actual_sample_size`, `healthy_evaluations_count`, `decision`).
+- `rollout_metric_snapshots`: Stage-scoped telemetry snapshots (`metric_key`, `metric_value`, `sample_size`, `freshness_status`).
+- `rollout_guardrails` & `guardrail_evaluations`: Configured thresholds (`operator`, `threshold`, `severity`) and per-evaluation results (`pass`, `warning`, `breach`, `insufficient_data`, `stale_data`).
+- `rollout_decisions`: Explainable progression/rollback decisions with `supporting_evidence` and `missing_evidence`.
+- `progressive_rollout_events`: Chronological audit trail streamed over `SSEBus`.
+- `rollback_operations`: Tracked Flagsmith rollback requests, approval references, and verification results.
+
+---
+
+## Release Intelligence & Learning Engine Tables (`0009_release_intelligence`)
+
+- `release_outcomes`: Normalized historical release outcomes (`outcome_type`, `failure_category`, `release_duration_seconds`, `recovery_duration_seconds`, `lead_time_seconds`, `approval_latency_seconds`, `data_quality_flags`, `verified`).
+- `release_failure_patterns`: Recurring failure patterns (`pattern_key`, `category`, `sample_size`, `failure_count`, `observed_rate`, `is_exploratory`, `confidence_data`).
+- `repository_intelligence_profiles`: Per-repository reliability metrics, `high_risk_modules`, and recommendations.
+- `recommendation_outcomes`: Outcome evaluation of `AgentDecision` recommendations (`VERIFIED_BENEFIT`, `OBSERVED_POSITIVE_OUTCOME`, `NEGATIVE_OUTCOME`, `INCONCLUSIVE`, `NOT_EVALUABLE`).
+- `release_insights`: Evidence-linked organizational insights.
+- `policy_recommendations`: Human-governed policy improvement proposals (`PENDING_REVIEW -> ACCEPTED/MODIFIED/REJECTED -> IMPLEMENTED -> VERIFIED`).
+- `intelligence_analysis_runs`: Reproducible analysis execution audit records.
+
+---
+
+## Developer Experience Integration Tables (`0010_dx_integration`)
+
+- `github_installations`: GitHub App installations & encrypted tokens/webhook secrets.
+- `github_webhook_events`: HMAC-verified webhook deliveries with `delivery_id` uniqueness and `processing_status`.
+- `github_check_runs`: Commit-SHA-scoped GitHub Check Runs with `is_superseded`.
+- `pull_request_analysis_comments`: Marker-based PR comments updated in place.
+- `notification_deliveries`: Slack & Discord delivery attempts, retry counts, and `dedupe_key`.
+- `release_readiness_reports`, `shareable_reports`, `share_link_access_logs`: Authoritative readiness reports and SHA-256 token-hashed share links.
+
+---
+
+## Multi-Repository Release Intelligence Tables (`0011_multi_repo_intelligence`)
+
+- `organizations`, `organization_repositories`: Organization container and repository membership.
+- `repository_dependencies`: Directed dependency edges (`library_dependency`, `service_dependency`, `api_dependency`, etc.).
+- `coordinated_release_plans`, `coordinated_release_items`: Approval-gated multi-repo release ordering & status.
+- `organization_release_policies`, `repository_policy_assignments`: Shared policies & approved exception overrides.
+- `organization_risk_snapshots`, `repository_health_snapshots`, `cross_repository_impact_assessments`: Longitudinal org risk, repo health, and impact propagation records.

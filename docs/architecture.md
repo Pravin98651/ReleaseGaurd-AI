@@ -384,3 +384,76 @@ Evaluated strictly in priority order:
 - **`demo-app/backend/` (Port `8001`)**: FastAPI service using `flagsmith` Python SDK (`FLAGSMITH_SERVER_ENV_KEY`), evaluating flags for incoming `user_id` identities (`flagsmith.get_identity_flags(identifier, traits=...)`), processing `/api/checkout`, and posting real events (`feature_variation_assigned`, `checkout_started`, `checkout_completed`, `checkout_abandoned`, `payment_failed`) asynchronously via `httpx` to ReleaseGuard AI's `POST http://localhost:8000/api/v1/events/ingest` (or `RELEASEGUARD_API_URL`).
 - **Traffic & Scenario Simulator**: Built-in `/api/simulate` endpoint + UI trigger in `demo-app` that runs N realistic deterministic user journeys (`user_001..user_N`) through live Flagsmith evaluation so evaluators can watch real Bayesian posteriors, guardrail alerts, recommendations, and Category C rollbacks operate on live data.
 - **`demo-app/tests/`**: Pytest suite verifying Checkout v1/v2 routing, Flagsmith SDK integration (mocked + live hook), and event payload schema compliance.
+
+
+---
+
+## Autonomous Release Lifecycle Engine
+
+- **Design Doc:** [docs/release-lifecycle-design.md](docs/release-lifecycle-design.md)
+- **State Machine (`release_state_machine.py`):** 18 lifecycle states with terminal immutability, pause/resume, optimistic concurrency (`version`), and atomic `ReleaseEvent` + `AuditLog` persistence.
+- **Readiness Engine (`release_readiness.py`):** Deterministic weighted scoring (`0–100`) with hard blocker capping (`BLOCKED` / `NOT_READY`).
+- **Orchestrator (`release_orchestrator.py`):** Reuses `pr_agent`, isolated `PatchValidator`, Flagsmith, Bayesian experiments, `PolicyEngine`, `notification_service`, and startup recovery (`recover_interrupted_releases`).
+- **Control Plane UI:** `/releases` (searchable lifecycle list + manual creation + rollout/incident tracker), `/releases/[id]` (9-stage tracker, readiness checks, approvals, artifacts, timeline, Markdown export), `/pull-requests` (`Create Release`), and Dashboard Release Operations KPIs.
+
+
+---
+
+## Autonomous Release Command Center
+
+- **Design Doc:** [docs/agent-command-center-design.md](docs/agent-command-center-design.md)
+- **Execution Control (`agent_execution_service.py`):** Formal 18-state machine, safe checkpoint pause/resume, cancellation, retry limits & non-retryable error guards, startup `INTERRUPTED` recovery, and pre-persistence secret redaction.
+- **Control Plane UI:** `/command-center` (KPIs, live SSE status, active execution cards, searchable history) and `/command-center/[executionId]` (timeline, tool inspector, evidence-backed decisions, human approvals, checkpoints), linked directly from `/releases/[id]`.
+
+
+---
+
+## Intelligent Release Risk Engine
+
+- **Design Doc:** [docs/intelligent-release-risk-design.md](docs/intelligent-release-risk-design.md)
+- **Analyzers (`app/services/risk_engine/`):** `CodeImpactAnalyzer`, `DependencyImpactAnalyzer`, `HistoricalFailureAnalyzer`, `TestCoverageAnalyzer`, `ProductionEnvironmentAnalyzer`, `FeatureFlagSuitabilityAnalyzer`, `OperationalReadinessAnalyzer`, and `IntelligentReleaseRiskService`.
+- **Frontend UI:** `/risk-intelligence` and `/risk-intelligence/[assessmentId]`, integrated with `/releases/[id]` and `/command-center`.
+
+---
+
+## Progressive Delivery Engine Architecture (Phase 4)
+
+See [progressive-delivery-design.md](file:///c:/Projects/ReleaseGuard%20AI/docs/progressive-delivery-design.md) for the complete architecture.
+
+- **Stage Sequence**: `1% -> 5% -> 10% -> 25% -> 50% -> 100%` (`ProgressiveRollout` + `ProgressiveRolloutStage`).
+- **Telemetry & Guardrail Gates**: `MetricCollectionService` computes rates and `p95` latency strictly from real `ExperimentEvent` records; `GuardrailEvaluationService` emits `PASS`, `WARNING`, `BREACH`, `INSUFFICIENT_DATA`, or `STALE_DATA` and never advances on timer alone.
+- **Flagsmith Integration & Safety**: Mutates Flagsmith via existing `FlagsmithClient` with readback verification and `RolloutHistory` logging. Production rollouts and rollbacks are Category C gated (`ApprovalStatus.PENDING`).
+- **Scheduler & Live Streaming**: `SchedulerService._handle_release_monitor` periodically evaluates active `OBSERVING` rollouts; `SSEBus` streams rollout events to `/progressive-delivery/[rolloutId]`.
+
+---
+
+## Release Intelligence & Learning Engine (Phase 5)
+
+See [release-intelligence-design.md](file:///c:/Projects/ReleaseGuard%20AI/docs/release-intelligence-design.md) for the complete architecture.
+
+- **Outcome Normalization**: `ReleaseOutcomeNormalizer` turns terminal `Release`, `RollbackOperation`, and `Approval` records into normalized `ReleaseOutcome` rows with explicit `data_quality_flags` and `EvidenceClassification`.
+- **Analytics & Pattern Detection**: `HistoricalReleaseAnalyticsService` computes DORA/rollout KPIs with Wilson confidence intervals; `FailurePatternAnalyzer` enforces minimum sample thresholds (`is_exploratory` for small samples).
+- **Repository, Dependency & Rollback Intelligence**: `RepositoryIntelligenceService`, `DependencyIntelligenceService`, and `RollbackIntelligenceService` track per-repo failure rates, high-risk modules, manifest correlations, and rollback causes.
+- **Recommendation Accuracy & Policy Governance**: `RecommendationEvaluationService` separates human acceptance from verified effectiveness; `ReleasePolicyIntelligenceService` enforces human review + Category C approval before implementing policy changes.
+- **Feedback Loops**: Enriches `HistoricalFailureAnalyzer` in the Risk Engine and runs incrementally in `SchedulerService._handle_ai_maintenance_report`.
+
+---
+
+## Developer Experience Integration Architecture (Phase 6)
+
+See [phase6-dx-integration-design.md](file:///c:/Projects/ReleaseGuard%20AI/docs/phase6-dx-integration-design.md).
+
+- **GitHub Status Checks & PR Comments**: `GitHubStatusCheckService` & `GitHubPullRequestCommentService` publish commit-SHA-scoped Check Runs (superseding stale commits) and update a single marker-identified PR comment (`<!-- releaseguard-ai:pr-summary -->`) in place.
+- **HMAC Webhooks**: `GitHubWebhookService` validates raw-body `X-Hub-Signature-256` and deduplicates by `delivery_id` with retry & dead-letter handling.
+- **Slack & Discord**: `DeveloperNotificationService` stores encrypted webhook URLs in `IntegrationConnection` and tracks outbound `NotificationDelivery` rows with deduplication.
+- **Readiness & Shareable Reports**: `ReleaseReadinessReportService` & `ShareableReportService` generate authoritative readiness reports and SHA-256 token-hashed expirable/revocable share links.
+
+---
+
+## Multi-Repository Release Intelligence Architecture (Phase 7)
+
+See [phase7-multi-repo-design.md](file:///c:/Projects/ReleaseGuard%20AI/docs/phase7-multi-repo-design.md).
+
+- **Organization & Registry**: `OrganizationManagementService` maps `Repository` instances into `OrganizationRepository` portfolios.
+- **Dependency Graph & Coordination**: `CrossRepositoryDependencyService` & `ReleaseCoordinationEngine` compute topological release orderings, detect cycles, assess downstream impact, and orchestrate `CoordinatedReleasePlan`s over existing `Release`s.
+- **Health & Shared Policies**: `RepositoryHealthScoringService` computes transparent deterministic scores (`INSUFFICIENT_DATA` for `< 2` releases); `OrganizationReleasePolicyService` enforces mandatory org policies (`is_mandatory=True`).

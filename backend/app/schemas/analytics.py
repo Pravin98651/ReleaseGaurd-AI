@@ -46,6 +46,12 @@ class ReleaseOperationsMetricsBlock(BaseModel):
     rollbacks_executed: int = 0
     releases_awaiting_approval: int = 0
     release_success_rate: float | None = None
+    lifecycle_total_releases: int = 0
+    lifecycle_active_releases: int = 0
+    lifecycle_ready_releases: int = 0
+    lifecycle_blocked_releases: int = 0
+    lifecycle_completed_releases: int = 0
+    lifecycle_avg_readiness_score: float | None = None
     trends: dict[str, MetricTrend] = Field(default_factory=dict)
 
 

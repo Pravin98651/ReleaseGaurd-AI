@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -8,22 +8,28 @@ import {
   BarChart3,
   Bell,
   Bot,
+  Brain,
+  Building2,
   CalendarClock,
   CheckSquare,
   ExternalLink,
   Flag,
   FlaskConical,
   FolderGit2,
+  GitBranch,
   GitPullRequest,
   HeartPulse,
   LayoutDashboard,
   LogOut,
   Menu,
+  Moon,
+  Plug,
   Rocket,
   ScrollText,
   ServerCog,
   Settings,
   ShieldCheck,
+  Sun,
   UserCheck,
   X,
 } from "lucide-react";
@@ -44,7 +50,12 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { href: "/dashboard", label: "Dashboard", icon: LayoutDashboard, group: "overview" },
   { href: "/metrics", label: "Metrics & Analytics", icon: BarChart3, group: "overview" },
+  { href: "/intelligence", label: "Release Intelligence", icon: Brain, group: "overview" },
+  { href: "/organization", label: "Organization Hub", icon: Building2, group: "overview" },
   { href: "/notifications", label: "Notifications", icon: Bell, group: "overview" },
+  { href: "/command-center", label: "Command Center", icon: Activity, group: "delivery" },
+  { href: "/risk-intelligence", label: "Risk Intelligence", icon: ShieldCheck, group: "delivery" },
+  { href: "/progressive-delivery", label: "Progressive Delivery", icon: GitBranch, group: "delivery" },
   { href: "/agent", label: "AI Agent", icon: Bot, group: "delivery" },
   { href: "/repositories", label: "Repositories", icon: FolderGit2, group: "delivery" },
   { href: "/pull-requests", label: "Pull Requests", icon: GitPullRequest, group: "delivery" },
@@ -60,6 +71,7 @@ const NAV_ITEMS: NavItem[] = [
     showApprovalsBadge: true,
   },
   { href: "/schedules", label: "Schedules", icon: CalendarClock, group: "governance" },
+  { href: "/integrations", label: "Integrations", icon: Plug, group: "governance" },
   { href: "/audit-logs", label: "Audit Logs", icon: ScrollText, group: "governance" },
   { href: "/system-health", label: "System Health", icon: ServerCog, group: "system" },
   { href: "/settings", label: "Settings", icon: Settings, group: "system" },
@@ -105,6 +117,26 @@ function HealthPill({
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    if (typeof window !== "undefined") {
+      return window.localStorage.getItem("rg_theme") === "light" ? "light" : "dark";
+    }
+    return "dark";
+  });
+
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.documentElement.classList.remove("dark", "light");
+      document.documentElement.classList.add(theme);
+    }
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem("rg_theme", theme);
+    }
+  }, [theme]);
+
+  const toggleTheme = () => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  };
   const { health, authStatus, backendReachable, pendingApprovalsCount, refresh } =
     useControlPlaneStatus();
 
@@ -314,6 +346,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </Link>
             )}
             <NotificationBell />
+            <button
+              type="button"
+              onClick={toggleTheme}
+              aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+              title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+              className="inline-flex items-center justify-center rounded-lg border border-slate-800 bg-slate-900 p-1.5 text-slate-300 transition-colors hover:bg-slate-800 hover:text-slate-100"
+            >
+              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
             <div className="hidden items-center gap-1.5 md:flex">
               <HealthPill
                 label={backendReachable ? `Backend (${health?.database ?? "ok"})` : "Backend Offline"}

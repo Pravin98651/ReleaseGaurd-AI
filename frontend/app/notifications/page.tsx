@@ -14,7 +14,6 @@ import {
   Trash2,
 } from "lucide-react";
 
-import { AppShell } from "@/components/AppShell";
 import { EmptyState, LoadingSkeleton, MetricCard, PageHeader, SectionCard } from "@/components/ui/StatePrimitives";
 import {
   clearResolvedNotifications,
@@ -116,8 +115,7 @@ export default function NotificationsPage() {
   };
 
   return (
-    <AppShell>
-      <div className="space-y-6">
+    <div className="space-y-6">
         <PageHeader
           title="Notification Centre"
           description="Persistent alerts across human approval queues, Bayesian guardrail breaches, PR risk findings, rollbacks, scheduled jobs, and integration errors."
@@ -359,6 +357,5 @@ export default function NotificationsPage() {
           </SectionCard>
         </div>
       </div>
-    </AppShell>
   );
 }

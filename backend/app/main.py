@@ -143,7 +143,13 @@ def create_app(
             await bootstrap_workspace_defaults(
                 session, bootstrap_env_tokens=bootstrap_env_tokens
             )
+        from app.services.agent_execution_service import AgentExecutionService
+        from app.services.release_orchestrator import ReleaseOrchestrator
         from app.services.scheduler import get_scheduler_service
+
+        async with factory() as recovery_session:
+            await ReleaseOrchestrator.recover_interrupted_releases(recovery_session)
+            await AgentExecutionService.recover_interrupted_executions(recovery_session)
 
         scheduler_svc = get_scheduler_service(app_instance)
         await scheduler_svc.recover_stale_runs()

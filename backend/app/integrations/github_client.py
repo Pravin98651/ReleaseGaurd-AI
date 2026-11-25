@@ -566,3 +566,85 @@ class GitHubClient:
             "commit_sha": new_commit_sha,
             "draft": bool(pr_data.get("draft", True)),
         }
+
+    async def create_check_run(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        name: str,
+        head_sha: str,
+        status: str,
+        conclusion: str | None = None,
+        title: str = "ReleaseGuard AI",
+        summary: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "name": name,
+            "head_sha": head_sha,
+            "status": status,
+            "output": {"title": title, "summary": summary},
+        }
+        if conclusion and status == "completed":
+            payload["conclusion"] = conclusion
+        resp = await self._request(
+            "POST", f"/repos/{owner}/{repo}/check-runs", json_body=payload, retry_safe=False
+        )
+        return dict(resp.json())
+
+    async def update_check_run(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        check_run_id: int,
+        status: str,
+        conclusion: str | None = None,
+        title: str = "ReleaseGuard AI",
+        summary: str = "",
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "status": status,
+            "output": {"title": title, "summary": summary},
+        }
+        if conclusion and status == "completed":
+            payload["conclusion"] = conclusion
+        resp = await self._request(
+            "PATCH",
+            f"/repos/{owner}/{repo}/check-runs/{check_run_id}",
+            json_body=payload,
+            retry_safe=True,
+        )
+        return dict(resp.json())
+
+    async def create_issue_comment(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        issue_number: int,
+        body: str,
+    ) -> dict[str, Any]:
+        resp = await self._request(
+            "POST",
+            f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
+            json_body={"body": body},
+            retry_safe=False,
+        )
+        return dict(resp.json())
+
+    async def update_issue_comment(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        comment_id: int,
+        body: str,
+    ) -> dict[str, Any]:
+        resp = await self._request(
+            "PATCH",
+            f"/repos/{owner}/{repo}/issues/comments/{comment_id}",
+            json_body={"body": body},
+            retry_safe=True,
+        )
+        return dict(resp.json())

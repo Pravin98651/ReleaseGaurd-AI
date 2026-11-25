@@ -364,3 +364,137 @@ All 34 tools run with `google-genai` `automatic_function_calling=AutomaticFuncti
 - `GET /api/v1/notifications`, `GET /api/v1/notifications/unread-count`, `PATCH /api/v1/notifications/{id}/read`, `PATCH /api/v1/notifications/{id}/resolve`, `POST /api/v1/notifications/read-all`, `/clear-resolved`, `GET/PATCH /api/v1/notifications/preferences`.
 - `GET /api/v1/events/stream` — Real-time workspace SSE feed with `Last-Event-ID` / `after_seq` replay and heartbeats.
 - `GET /api/v1/system/health`, `/integrations`, `/workers`, `/scheduler` — Deep probes for DB latency, API requests/5xx/latency, scheduler ticks, workers, integrations (redacted), and NovaShop demo services.
+
+
+---
+
+## Autonomous Release Lifecycle Engine (`/api/v1/releases`)
+
+All release lifecycle routes live under `/api/v1/releases` (preserving `/overview` and `/investigate`):
+- `GET /api/v1/releases` — Search (`q`), filter (`status`, `readiness_status`, `environment`, `repository_id`, `owner_id`, `risk_level`), sort, and paginate releases.
+- `POST /api/v1/releases` — Create a manual or PR-linked release (with optional `ai_assist` and duplicate PR protection).
+- `GET /api/v1/releases/{release_id}` — Full release detail (`release`, `stages`, `checks`, `events`, `artifacts`, `approvals`).
+- `PATCH /api/v1/releases/{release_id}` — Update release metadata/targets with optimistic concurrency (`expected_version`) and stale approval invalidation.
+- `POST /api/v1/releases/{release_id}/analyze` — Run PR & risk analysis stage.
+- `POST /api/v1/releases/{release_id}/validate` — Run isolated patch validation stage.
+- `POST /api/v1/releases/{release_id}/readiness/evaluate` — Recompute deterministic `ReleaseReadinessService` score & checks.
+- `GET /api/v1/releases/{release_id}/stages`, `/timeline`, `/checks`, `/artifacts` — Granular lifecycle views.
+- `POST /api/v1/releases/{release_id}/pause`, `/resume`, `/retry`, `/cancel` — Lifecycle controls with optimistic concurrency.
+- `POST /api/v1/releases/{release_id}/approval-request` — Create `Approval` bound to `release_id` & `release_version`.
+- `GET /api/v1/releases/{release_id}/report` & `/report/export` — Structured JSON report and downloadable Markdown report.
+
+
+---
+
+## Autonomous Release Command Center (`/api/v1/agent-executions`)
+
+- `GET /api/v1/agent-executions/overview` & `/metrics` — Active, queued, awaiting approval, paused, failed, completed counts, average duration, and tool failure rate.
+- `POST /api/v1/agent-executions` & `GET /api/v1/agent-executions` — Create, search, and filter executions (`agent_type`, `status`, `repository_id`, `release_id`, `failed_only`, `scheduled_only`).
+- `GET /api/v1/agent-executions/{execution_id}`, `/summary`, `/steps`, `/timeline`, `/tools`, `/decisions`, `/checkpoints` — Full execution cockpit data.
+- `POST /api/v1/agent-executions/{execution_id}/pause`, `/resume`, `/cancel`, `/retry`, `/steps/{step_id}/retry` — Optimistically locked (`expected_version`) execution controls.
+- `GET /api/v1/agent-executions/stream` & `/{execution_id}/stream` — Authenticated SSE streams reusing `SSEBus`.
+
+
+---
+
+## Intelligent Release Risk Engine (`/api/v1/risk-assessments`, `/api/v1/risk-engine`)
+
+- `POST /api/v1/risk-assessments` & `GET /api/v1/risk-assessments` — Create and list multi-dimensional release risk assessments.
+- `GET /api/v1/risk-assessments/{assessment_id}`, `/summary`, `/dimensions`, `/findings`, `/evidence`, `/scenarios`, `/mitigations` — Inspect full explainable risk assessment details.
+- `POST /api/v1/risk-assessments/{assessment_id}/reanalyze` — Recompute assessment for current commit/release version (marking stale assessments `outdated`).
+- `POST/PATCH /api/v1/risk-assessments/{assessment_id}/mitigations` & `/{mitigation_id}/verify` — Track mitigation acceptance and verification evidence.
+- `GET /api/v1/repositories/{repository_id}/dependency-graph` & `/historical-risk` — Repository dependency graph and historical failure analysis.
+- `GET/PATCH /api/v1/risk-engine/configuration` — Versioned, audited scoring weights and thresholds.
+
+---
+
+## Progressive Delivery Engine (Phase 4)
+
+Router: `/api/v1/rollouts` (`backend/app/api/v1/progressive_delivery.py`)
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/v1/rollouts` | Create progressive rollout (`1% -> 5% -> 10% -> 25% -> 50% -> 100%`) with observation windows and guardrails |
+| `GET` | `/api/v1/rollouts` | List rollouts filtered by `status`, `environment`, `release_id` |
+| `GET` | `/api/v1/rollouts/{rollout_id}` | Full rollout detail (`rollout`, `stages`, `guardrails`, `metrics`, `evaluations`, `decisions`, `events`, `rollbacks`) |
+| `POST` | `/api/v1/rollouts/{rollout_id}/validate` | Validate rollout preconditions and flag/environment readiness |
+| `POST` | `/api/v1/rollouts/{rollout_id}/start` | Start rollout (activates Stage 1 in non-prod; creates Category C `Approval` in `production`) |
+| `POST` | `/api/v1/rollouts/{rollout_id}/stages/{stage_id}/evaluate` | Collect real `ExperimentEvent` metrics, evaluate guardrails, and emit `RolloutDecision` |
+| `POST` | `/api/v1/rollouts/{rollout_id}/stages/{stage_id}/advance` | Advance to next stage (only when `ADVANCE_RECOMMENDED`; production requires human approval) |
+| `POST` | `/api/v1/rollouts/{rollout_id}/pause` | Pause active rollout |
+| `POST` | `/api/v1/rollouts/{rollout_id}/resume` | Resume paused rollout |
+| `POST` | `/api/v1/rollouts/{rollout_id}/cancel` | Cancel rollout |
+| `POST` | `/api/v1/rollouts/{rollout_id}/rollback/execute` | Execute Flagsmith rollback to `0%` (non-prod direct; `production` requires `has_production_approval=True` / HTTP 403 otherwise) |
+| `GET` | `/api/v1/rollouts/{rollout_id}/stream` | Live SSE stream of rollout events (`SSEBus`) |
+
+---
+
+## Release Intelligence & Learning Engine (Phase 5)
+
+Router: `/api/v1/intelligence` (`backend/app/api/v1/intelligence.py`)
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` | `/api/v1/intelligence/overview` | Historical KPIs, trend direction, rollback summary, recommendation accuracy, top patterns, and pending policies |
+| `GET` | `/api/v1/intelligence/release-performance` | DORA & rollout KPIs with explicit denominators and data-quality flags |
+| `GET` | `/api/v1/intelligence/trends` | Period-over-period release reliability comparison |
+| `GET` | `/api/v1/intelligence/failure-patterns` | Paginated recurring failure patterns with exploratory/sample-size flags |
+| `POST` | `/api/v1/intelligence/failure-patterns/analyze` | Run failure pattern analyzer |
+| `GET` | `/api/v1/intelligence/repositories` | Repository intelligence profiles |
+| `GET` | `/api/v1/intelligence/repositories/{repository_id}` | Single repository intelligence profile |
+| `GET` | `/api/v1/intelligence/dependencies` | Dependency/manifest failure associations |
+| `GET` | `/api/v1/intelligence/rollback-analysis` | Rollback cause classification and recovery metrics |
+| `GET` | `/api/v1/intelligence/recommendations/accuracy` | Acceptance vs. verified positive outcome metrics |
+| `GET` | `/api/v1/intelligence/policy-recommendations` | List policy improvement proposals |
+| `POST` | `/api/v1/intelligence/policy-recommendations/{id}/review` | Accept, reject, or modify policy proposal |
+| `POST` | `/api/v1/intelligence/policy-recommendations/{id}/approve` | Category C human approval |
+| `POST` | `/api/v1/intelligence/policy-recommendations/{id}/implement` | Apply approved policy (requires prior approval) |
+| `POST` | `/api/v1/intelligence/policy-recommendations/{id}/verify` | Verify post-implementation effectiveness |
+| `POST` | `/api/v1/intelligence/query` | Evidence-linked Release Knowledge Base query |
+| `POST` | `/api/v1/intelligence/analyze` | Trigger `ReleaseLearningEngine.run_analysis` |
+
+---
+
+## Developer Experience Integration (Phase 6)
+
+Router: `dx_router` (`backend/app/api/v1/dx_integration.py`)
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `POST` | `/api/v1/integrations/github/app/connect` | Connect GitHub App installation & encrypted webhook/access secrets |
+| `GET` | `/api/v1/integrations/github/installations` | List GitHub App installations |
+| `DELETE` | `/api/v1/integrations/github/installations/{id}` | Disconnect GitHub App installation |
+| `GET` | `/api/v1/integrations/github/events` | List GitHub webhook deliveries |
+| `POST` | `/api/v1/integrations/github/events/{id}/retry` | Retry failed webhook event |
+| `POST` | `/api/v1/webhooks/github` | Raw-body HMAC-SHA256 verified GitHub webhook receiver |
+| `POST` | `/api/v1/github/pull-requests/{repo_id}/{pr}/analyze` | Publish policy-aware Check Run + marker-based PR comment |
+| `GET` | `/api/v1/github/pull-requests/{repo_id}/{pr}/status` | Inspect Check Runs & PR comment state |
+| `POST` | `/api/v1/releases/{release_id}/reports` | Generate authoritative `ReleaseReadinessReport` |
+| `POST` | `/api/v1/reports/{report_id}/share` | Create time-limited cryptographic share link |
+| `DELETE` | `/api/v1/reports/{report_id}/shares/{share_id}` | Revoke share link immediately |
+| `GET` | `/api/v1/shared/{token}` | Resolve shareable report with access logging |
+| `GET` | `/api/v1/integrations/notifications` | List Slack/Discord connections & delivery history |
+| `POST` | `/api/v1/integrations/slack/connect` | Connect Slack webhook |
+| `POST` | `/api/v1/integrations/discord/connect` | Connect Discord webhook |
+
+---
+
+## Multi-Repository Release Intelligence (Phase 7)
+
+Router: `org_router` (`backend/app/api/v1/organization.py`)
+
+| Method | Endpoint | Description |
+| :--- | :--- | :--- |
+| `GET` / `POST` | `/api/v1/organizations` | List or create organization |
+| `GET` / `POST` | `/api/v1/organizations/{id}/repositories` | List or register organization repositories |
+| `GET` | `/api/v1/organizations/{id}/release-overview` | Cross-repository release portfolio KPIs |
+| `GET` | `/api/v1/organizations/{id}/dependency-graph` | Directed dependency graph & topological release order |
+| `POST` | `/api/v1/organizations/{id}/dependencies` | Add repository dependency edge |
+| `POST` | `/api/v1/releases/{release_id}/cross-repository-impact` | Assess downstream repository impact |
+| `POST` / `GET` | `/api/v1/organizations/{id}/coordinated-releases` | Create or list coordinated release plans |
+| `POST` | `/api/v1/coordinated-releases/{plan_id}/approve` | Approve coordinated release plan |
+| `POST` | `/api/v1/coordinated-releases/{plan_id}/start` | Start approved coordinated release plan |
+| `GET` | `/api/v1/organizations/{id}/repository-rankings` | Repository health rankings |
+| `GET` / `POST` | `/api/v1/organizations/{id}/policies` | List or create shared organization policies |
+| `POST` | `/api/v1/organizations/{id}/policies/{pid}/publish` | Publish organization policy |
+| `GET` / `POST` | `/api/v1/organizations/{id}/intelligence(/query)` | Organization risk snapshot & grounded assistant |
