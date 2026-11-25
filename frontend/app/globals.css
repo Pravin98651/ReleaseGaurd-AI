@@ -1,0 +1,53 @@
+@import "tailwindcss";
+
+:root {
+  --bg-canvas: #090c12;
+  --bg-sidebar: #0d1119;
+  --bg-surface: #111622;
+  --bg-elevated: #161d2d;
+  --border-subtle: #1e2738;
+  --border-strong: #2d3a52;
+  --text-primary: #f1f5f9;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent-indigo: #6366f1;
+  --accent-cyan: #06b6d4;
+}
+
+@theme inline {
+  --color-background: var(--bg-canvas);
+  --color-foreground: var(--text-primary);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+html,
+body {
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  color-scheme: dark;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Subtle custom scrollbars for control-plane density */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0b0f17;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #232d42;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #33415c;
+}

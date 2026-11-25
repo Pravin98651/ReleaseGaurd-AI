@@ -1,0 +1,17 @@
+.venv
+venv
+__pycache__
+*.py[cod]
+*$py.class
+.pytest_cache
+.ruff_cache
+.mypy_cache
+*.db
+*.sqlite
+*.sqlite3
+.env
+.env.*
+!.env.example
+.git
+.DS_Store
+Thumbs.db

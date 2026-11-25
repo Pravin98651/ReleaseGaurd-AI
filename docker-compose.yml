@@ -1,0 +1,158 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-releaseguard}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-releaseguard}
+      POSTGRES_DB: ${POSTGRES_DB:-releaseguard}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${POSTGRES_USER:-releaseguard} -d ${POSTGRES_DB:-releaseguard}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8000
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://localhost:3001}
+      SECRET_KEY: ${SECRET_KEY:-change-me-32-char-random-string}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://releaseguard:releaseguard@postgres:5432/releaseguard}
+      USE_SQLITE_FALLBACK: ${USE_SQLITE_FALLBACK:-false}
+      SQLITE_FALLBACK_URL: ${SQLITE_FALLBACK_URL:-sqlite+aiosqlite:///./releaseguard_local.db}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-2.5-flash}
+      GITHUB_CLIENT_ID: ${GITHUB_CLIENT_ID:-}
+      GITHUB_CLIENT_SECRET: ${GITHUB_CLIENT_SECRET:-}
+      GITHUB_OAUTH_REDIRECT_URI: ${GITHUB_OAUTH_REDIRECT_URI:-http://localhost:3000/settings?github_callback=1}
+      GITHUB_PAT: ${GITHUB_PAT:-}
+      FLAGSMITH_API_URL: ${FLAGSMITH_API_URL:-https://api.flagsmith.com/api/v1}
+      FLAGSMITH_EDGE_API_URL: ${FLAGSMITH_EDGE_API_URL:-https://edge.api.flagsmith.com/api/v1}
+      FLAGSMITH_ORG_TOKEN: ${FLAGSMITH_ORG_TOKEN:-}
+      FLAGSMITH_PROJECT_ID: ${FLAGSMITH_PROJECT_ID:-}
+      FLAGSMITH_DEV_ENV_KEY: ${FLAGSMITH_DEV_ENV_KEY:-}
+      FLAGSMITH_STAGING_ENV_KEY: ${FLAGSMITH_STAGING_ENV_KEY:-}
+      FLAGSMITH_PROD_ENV_KEY: ${FLAGSMITH_PROD_ENV_KEY:-}
+      APPROVAL_TTL_SECONDS: ${APPROVAL_TTL_SECONDS:-900}
+      CATEGORY_B_REQUIRES_CONFIRMATION: ${CATEGORY_B_REQUIRES_CONFIRMATION:-true}
+      BAYESIAN_MC_SAMPLES: ${BAYESIAN_MC_SAMPLES:-50000}
+      BAYESIAN_MC_SEED: ${BAYESIAN_MC_SEED:-42}
+      BAYESIAN_MIN_EXPOSURES: ${BAYESIAN_MIN_EXPOSURES:-100}
+      EVENT_INGEST_KEY: ${EVENT_INGEST_KEY:-dev-ingest-key-change-me}
+      PATCH_VALIDATION_TIMEOUT_SECONDS: ${PATCH_VALIDATION_TIMEOUT_SECONDS:-30}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_DEMO_APP_URL: ${NEXT_PUBLIC_DEMO_APP_URL:-http://localhost:3001}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PORT: 3000
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+      NEXT_PUBLIC_DEMO_APP_URL: ${NEXT_PUBLIC_DEMO_APP_URL:-http://localhost:3001}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  demo-backend:
+    build:
+      context: ./demo-app/backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DEMO_BACKEND_PORT: 8001
+      FLAGSMITH_EDGE_API_URL: ${FLAGSMITH_EDGE_API_URL:-https://edge.api.flagsmith.com/api/v1}
+      FLAGSMITH_SERVER_ENV_KEY: ${FLAGSMITH_SERVER_ENV_KEY:-}
+      RELEASEGUARD_API_URL: http://backend:8000
+      RELEASEGUARD_INGEST_KEY: ${RELEASEGUARD_INGEST_KEY:-dev-ingest-key-change-me}
+    ports:
+      - "${DEMO_BACKEND_PORT:-8001}:8001"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  demo-frontend:
+    build:
+      context: ./demo-app/frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_DEMO_API_URL: ${NEXT_PUBLIC_DEMO_API_URL:-http://localhost:8001}
+        NEXT_PUBLIC_FLAGSMITH_ENV_KEY: ${NEXT_PUBLIC_FLAGSMITH_ENV_KEY:-}
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      PORT: 3001
+      NEXT_PUBLIC_DEMO_API_URL: ${NEXT_PUBLIC_DEMO_API_URL:-http://localhost:8001}
+      NEXT_PUBLIC_FLAGSMITH_ENV_KEY: ${NEXT_PUBLIC_FLAGSMITH_ENV_KEY:-}
+      FLAGSMITH_EDGE_API_URL: ${FLAGSMITH_EDGE_API_URL:-https://edge.api.flagsmith.com/api/v1}
+    ports:
+      - "${DEMO_FRONTEND_PORT:-3001}:3001"
+    depends_on:
+      demo-backend:
+        condition: service_started
+
+volumes:
+  pgdata:
