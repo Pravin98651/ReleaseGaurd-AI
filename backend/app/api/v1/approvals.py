@@ -206,6 +206,12 @@ async def approve_action(
         action_href="/approvals",
         metadata={"approval_id": str(updated.id), "decision": "approved"},
     )
+    if updated.release_id is not None:
+        from app.services.release_orchestrator import ReleaseOrchestrator
+
+        await ReleaseOrchestrator.sync_approval_decision(
+            session, updated, approved=True, actor_id=operator.id, comment=comment
+        )
     await session.commit()
     return ApprovalDecisionResponse(
         approval=ApprovalOut.model_validate(updated),
@@ -238,6 +244,12 @@ async def reject_action(
             "comment": body.comment,
         },
     )
+    if rejected.release_id is not None:
+        from app.services.release_orchestrator import ReleaseOrchestrator
+
+        await ReleaseOrchestrator.sync_approval_decision(
+            session, rejected, approved=False, actor_id=operator.id, comment=body.comment
+        )
     from app.models import NotificationCategory
     from app.services.notification_service import create_notification
 

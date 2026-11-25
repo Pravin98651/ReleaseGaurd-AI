@@ -358,6 +358,24 @@ async def _run_revalidation(
                     "actual_status": exp.status.value,
                 },
             }
+
+    if norm == "release_rollout_approve":
+        from app.models import Release
+
+        rel = await ctx.session.get(Release, uuid.UUID(str(approval.target_resource_id)))
+        if rel is None:
+            return {"ok": False, "details": {"error": "Release not found."}}
+        expected_ver = pre.get("release_version")
+        if expected_ver is not None and rel.version != int(expected_ver):
+            return {
+                "ok": False,
+                "details": {
+                    "error": "Release modified since approval was requested.",
+                    "expected_version": expected_ver,
+                    "actual_version": rel.version,
+                },
+            }
+        return {"ok": True, "details": {"release_version": rel.version}}
         return {"ok": True, "details": {"status": exp.status.value}}
 
     return {"ok": False, "details": {"error": f"Unknown action_type '{approval.action_type}'"}}
@@ -411,6 +429,13 @@ async def _run_execution(
     if norm in ("experiment_stop", "stop_or_conclude_experiment"):
         args = StopOrConcludeExperimentInput.model_validate(payload)
         return await handle_stop_or_conclude_experiment(ctx, args)
+
+    if norm == "release_rollout_approve":
+        return {
+            "verified": True,
+            "release_id": str(approval.target_resource_id),
+            "release_version": payload.get("release_version"),
+        }
 
     raise ValueError(f"Unsupported approval action_type '{approval.action_type}'.")
 

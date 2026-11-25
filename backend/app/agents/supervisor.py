@@ -555,6 +555,31 @@ class ReleaseGuardSupervisor:
                 category = PolicyCategory(str(call.get("category") or "A"))
 
                 async with self.session_factory() as session:
+                    from sqlalchemy import select as sa_select
+
+                    from app.models import AgentExecution
+                    from app.services.agent_execution_service import (
+                        AgentExecutionService,
+                    )
+
+                    exe = (
+                        await session.execute(
+                            sa_select(AgentExecution)
+                            .where(AgentExecution.agent_task_id == uuid.UUID(state["task_id"]))
+                            .limit(1)
+                        )
+                    ).scalar_one_or_none()
+                    tool_call_rec = None
+                    if exe is not None:
+                        tool_call_rec = await AgentExecutionService.record_tool_start(
+                            session,
+                            exe,
+                            tool_name=tool_name,
+                            tool_category=f"category_{category.value.lower()}",
+                            is_reversible=(category == PolicyCategory.A),
+                            input_summary=raw_args,
+                        )
+
                     ctx = self._make_tool_context(session, state)
                     try:
                         out = await execute_tool_call(ctx, tool_name, raw_args)
@@ -562,6 +587,14 @@ class ReleaseGuardSupervisor:
                         audit_status = AuditStatus.SUCCESS
                         verified = out.get("verified") if "verified" in out else out.get("matches", True)
                         summary = f"Executed {tool_name} successfully."
+                        if exe is not None and tool_call_rec is not None:
+                            await AgentExecutionService.record_tool_result(
+                                session,
+                                exe,
+                                tool_call_rec,
+                                success=True,
+                                output_summary=out if isinstance(out, dict) else {"result": str(out)},
+                            )
                     except Exception as exc:  # noqa: BLE001
                         err_msg = scrub_secrets(str(exc))
                         out = {"error": "TOOL_EXECUTION_ERROR", "message": err_msg}
@@ -569,6 +602,16 @@ class ReleaseGuardSupervisor:
                         audit_status = AuditStatus.FAILED
                         verified = False
                         summary = f"{tool_name} failed: {err_msg}"
+                        if exe is not None and tool_call_rec is not None:
+                            await AgentExecutionService.record_tool_result(
+                                session,
+                                exe,
+                                tool_call_rec,
+                                success=False,
+                                output_summary=out,
+                                error_code="TOOL_EXECUTION_ERROR",
+                                error_message=err_msg,
+                            )
 
                     await PolicyEngine.record_audit_log(
                         session,
@@ -938,13 +981,47 @@ class ReleaseGuardSupervisor:
         config: dict[str, Any],
     ) -> dict[str, Any]:
         async with self.session_factory() as session:
+            from sqlalchemy import select as sa_select
+
+            from app.models import AgentExecution, AgentExecutionStatus
+            from app.services.agent_execution_service import (
+                TERMINAL_EXECUTION_STATES,
+                AgentExecutionService,
+            )
+
             task = await session.get(AgentTask, task_id)
             sess = await session.get(AgentSession, session_id)
             if task is not None:
                 task.status = AgentTaskStatus.RUNNING
                 task.started_at = task.started_at or utcnow()
                 task.gemini_model = self.gemini_client.model
-                await session.commit()
+            exe = (
+                await session.execute(
+                    sa_select(AgentExecution).where(AgentExecution.agent_task_id == task_id).limit(1)
+                )
+            ).scalar_one_or_none()
+            if exe is not None and exe.status not in TERMINAL_EXECUTION_STATES:
+                if exe.status == AgentExecutionStatus.QUEUED:
+                    await AgentExecutionService.transition_execution(
+                        session,
+                        exe,
+                        AgentExecutionStatus.INITIALIZING,
+                        stage="initializing",
+                        activity="Initializing agent context",
+                    )
+                if exe.status in {
+                    AgentExecutionStatus.INITIALIZING,
+                    AgentExecutionStatus.WAITING_FOR_APPROVAL,
+                    AgentExecutionStatus.RESUMING,
+                }:
+                    await AgentExecutionService.transition_execution(
+                        session,
+                        exe,
+                        AgentExecutionStatus.RUNNING,
+                        stage="running",
+                        activity="Executing specialist workflow",
+                    )
+            await session.commit()
 
         try:
             result = await self.graph.ainvoke(invoke_input, config=config)
@@ -979,15 +1056,46 @@ class ReleaseGuardSupervisor:
             task = await session.get(AgentTask, task_id)
             sess = await session.get(AgentSession, session_id)
             if task is not None:
+                from sqlalchemy import select as sa_select
+
+                from app.models import AgentExecution, AgentExecutionStatus
+                from app.services.agent_execution_service import (
+                    TERMINAL_EXECUTION_STATES,
+                    AgentExecutionService,
+                )
+
+                exe = (
+                    await session.execute(
+                        sa_select(AgentExecution)
+                        .where(AgentExecution.agent_task_id == task_id)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
                 if interrupted:
                     task.status = AgentTaskStatus.AWAITING_APPROVAL
                     if sess is not None:
                         sess.status = AgentSessionStatus.PAUSED_APPROVAL
+                    if exe is not None and exe.status not in TERMINAL_EXECUTION_STATES:
+                        await AgentExecutionService.transition_execution(
+                            session,
+                            exe,
+                            AgentExecutionStatus.WAITING_FOR_APPROVAL,
+                            stage="approval_gate",
+                            activity="Waiting for human approval",
+                        )
                 else:
                     task.status = AgentTaskStatus.COMPLETED
                     task.final_response = str(result.get("final_response") or "")
                     task.token_usage = dict(result.get("token_usage") or {})
                     task.completed_at = utcnow()
+                    if exe is not None and exe.status not in TERMINAL_EXECUTION_STATES:
+                        await AgentExecutionService.transition_execution(
+                            session,
+                            exe,
+                            AgentExecutionStatus.COMPLETED,
+                            stage="completed",
+                            activity="Execution completed",
+                        )
                     if sess is not None:
                         sess.status = AgentSessionStatus.ACTIVE
                         if result.get("active_specialist"):

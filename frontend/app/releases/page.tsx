@@ -38,6 +38,7 @@ import {
   RecommendationBadge,
   StatusBadge,
 } from "@/components/StatusBadges";
+import { ReleaseLifecycleList } from "@/components/ReleaseLifecycleList";
 import { RolloutStepper } from "@/components/RolloutStepper";
 import { ApprovalActionCard } from "@/components/ApprovalActionCard";
 
@@ -186,6 +187,9 @@ export default function ReleasesPage() {
           }}
         />
       )}
+
+      {/* Autonomous Release Lifecycles */}
+      <ReleaseLifecycleList />
 
       {/* Active Gradual Rollouts */}
       <SectionCard

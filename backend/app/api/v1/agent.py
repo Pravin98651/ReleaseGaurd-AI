@@ -198,6 +198,31 @@ async def send_agent_message(
     )
     agent_sess.message_history = history
     agent_sess.updated_at = utcnow()
+    await session.flush()
+
+    from app.services.agent_execution_service import AgentExecutionService
+
+    scope = dict(agent_sess.context_scope or {})
+
+    def _opt_uuid(val: Any) -> uuid.UUID | None:
+        try:
+            return uuid.UUID(str(val)) if val else None
+        except (ValueError, TypeError):
+            return None
+
+    await AgentExecutionService.create_execution(
+        session,
+        agent_type=(body.specialist_hint.value if body.specialist_hint else agent_sess.active_specialist.value),
+        agent_name=f"ReleaseGuard {(body.specialist_hint.value if body.specialist_hint else agent_sess.active_specialist.value)}",
+        task_name=body.content[:200],
+        task_description=body.content,
+        initiated_by_id=operator.id,
+        agent_task_id=task.id,
+        repository_id=_opt_uuid(scope.get("repository_id")),
+        pull_request_id=_opt_uuid(scope.get("pull_request_id")),
+        release_id=_opt_uuid(scope.get("release_id")),
+        experiment_id=_opt_uuid(scope.get("experiment_id")),
+    )
     await session.commit()
     await session.refresh(task)
 
