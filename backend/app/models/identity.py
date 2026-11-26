@@ -137,7 +137,7 @@ class WorkspaceSettings(Base):
     )
     approval_ttl_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=900)
     gemini_model: Mapped[str] = mapped_column(
-        String(100), nullable=False, default="gemini-2.5-flash"
+        String(100), nullable=False, default="gemini-3.5-flash-lite"
     )
     flagsmith_analytics_mode: Mapped[AnalyticsMode] = mapped_column(
         str_enum(AnalyticsMode, length=50),

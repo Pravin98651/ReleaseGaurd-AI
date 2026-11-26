@@ -39,7 +39,7 @@ Paste `SECRET_KEY` and `ENCRYPTION_KEY` into `.env`.
 | :--- | :--- |
 | `USE_SQLITE_FALLBACK` | Set `true` for local dev/tests without PostgreSQL; `false` for Docker/PostgreSQL |
 | `GEMINI_API_KEY` | Google AI Studio / Gemini API key for `google-genai` |
-| `GEMINI_MODEL` | Default `gemini-2.5-flash` (editable at runtime in `/settings`; live fallback automatically tries `gemini-3.5-flash-lite` -> `gemini-3.8-flash` -> `gemini-3.1-flash-lite` -> `gemini-2.5-flash-lite` if a model is overloaded or deprecated) |
+| `GEMINI_MODEL` | Default `gemini-3.5-flash-lite` (editable at runtime in `/settings`; live fallback automatically tries `gemini-3.5-flash-lite` -> `gemini-3.8-flash` -> `gemini-3.1-flash-lite` if a model is overloaded or deprecated) |
 | `EVENT_INGEST_KEY` | Shared secret sent in `X-Ingest-Key` by `demo-app/backend` (`RELEASEGUARD_INGEST_KEY`); default placeholder fails startup in `APP_ENV=production` |
 | `REQUIRE_AUTH` | Require Control Plane sign-in (`false` allowed in dev; enforced `true` when `APP_ENV=production`) |
 | `AUTH_SESSION_TTL_SECONDS` | Operator session TTL in seconds (default `28800`) |
@@ -72,8 +72,9 @@ Paste `SECRET_KEY` and `ENCRYPTION_KEY` into `.env`.
 1. Create a Flagsmith project (e.g., `NovaShop`) with environments `development`, `staging`, and `production`.
 2. Create an Organisation API Key (**Settings -> API Keys**) and note your numeric **Project ID** and each environment's **API Key**.
 3. Connect Flagsmith in `.env` or via `http://localhost:3000/settings`.
-4. **Feature Versioning v1 & v2**: ReleaseGuard automatically detects `use_v2_feature_versioning` per environment and handles both legacy `/featurestates/` and v2 `/versions/` + `publish/` lifecycles.
-5. **Capability Probe**: ReleaseGuard probes `/api/v1/environments/{env_key}/experiments/`. If unavailable (`403`/`404`), it activates `tracked_event_fallback` automatically using real events sent to `/api/v1/events/ingest`.
+4. **Management API vs. Flagsmith CLI**: ReleaseGuard's backend integrates directly with the **Flagsmith Management API** (`/api/v1/...` authenticated with `FLAGSMITH_ORG_TOKEN`) for flag/segment/version mutations and the **Flagsmith Edge Flags API** (`/api/v1/` with environment keys) for flag evaluation. The **Flagsmith CLI** is **not required** by ReleaseGuard or `demo-app` (operators may optionally use it for their own CI/CD or local project workflows).
+5. **Feature Versioning v1 & v2**: ReleaseGuard automatically detects `use_v2_feature_versioning` per environment and handles both legacy `/featurestates/` and v2 `/versions/` + `publish/` lifecycles.
+6. **Capability Probe**: ReleaseGuard probes `/api/v1/environments/{env_key}/experiments/`. If unavailable (`403`/`404`), it activates `tracked_event_fallback` automatically using real events sent to `/api/v1/events/ingest`.
 
 ---
 

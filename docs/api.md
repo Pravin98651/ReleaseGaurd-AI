@@ -294,13 +294,13 @@ All 34 tools run with `google-genai` `automatic_function_calling=AutomaticFuncti
 | `USE_SQLITE_FALLBACK` | `false` (`true` for non-Docker local) | No | `backend` | Switches backend + Alembic to `SQLITE_FALLBACK_URL` |
 | `SQLITE_FALLBACK_URL` | `sqlite+aiosqlite:///./releaseguard_local.db` | No | `backend` | Local SQLite DB file URL |
 | `GEMINI_API_KEY` | `your-gemini-api-key` | Yes (AI) | `backend` | Official `google-genai` API key |
-| `GEMINI_MODEL` | `gemini-2.5-flash` | No | `backend` | Configurable Gemini model ID |
+| `GEMINI_MODEL` | `gemini-3.5-flash-lite` | No | `backend` | Configurable Gemini model ID |
 | `GITHUB_CLIENT_ID` | `` | Optional | `backend` | GitHub OAuth app client ID |
 | `GITHUB_CLIENT_SECRET` | `` | Optional | `backend` | GitHub OAuth app client secret |
 | `GITHUB_OAUTH_REDIRECT_URI` | `http://localhost:3000/settings?github_callback=1` | Optional | `backend` | OAuth callback URL |
 | `GITHUB_PAT` | `` | Optional | `backend` | Optional bootstrap PAT (can connect via `/settings` UI instead) |
-| `FLAGSMITH_API_URL` | `https://api.flagsmith.com/api/v1` | Yes | `backend` | Flagsmith Management API base URL |
-| `FLAGSMITH_EDGE_API_URL` | `https://edge.api.flagsmith.com/api/v1` | Yes | `backend, demo-*` | Flagsmith Edge Flags API base URL |
+| `FLAGSMITH_API_URL` | `https://api.flagsmith.com/api/v1` | Yes | `backend` | Flagsmith Management API base URL (used directly via `FLAGSMITH_ORG_TOKEN`; Flagsmith CLI is not required) |
+| `FLAGSMITH_EDGE_API_URL` | `https://edge.api.flagsmith.com/api/v1` | Yes | `backend, demo-*` | Flagsmith Edge Flags API base URL (used with environment keys for live flag evaluation) |
 | `FLAGSMITH_ORG_TOKEN` | `` | Optional | `backend` | Optional bootstrap Flagsmith Org API token |
 | `FLAGSMITH_PROJECT_ID` | `` | Optional | `backend` | Optional bootstrap Flagsmith project ID |
 | `FLAGSMITH_DEV_ENV_KEY` | `` | Optional | `backend` | Flagsmith Development environment key |

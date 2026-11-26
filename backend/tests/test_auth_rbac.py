@@ -325,3 +325,76 @@ async def test_auth_login_logout_github_oauth_and_rbac_enforcement(
                 await check_sess.execute(select(User).where(User.email == "rm@acme.dev"))
             ).scalar_one()
             assert logs[-1].actor_id == str(rm_user.id)
+
+
+def test_startup_auth_hardening_create_all_guard_and_gemini_default(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from app.agents.gemini_client import GeminiClient
+    from app.main import should_create_tables_on_startup, validate_startup_auth
+    from app.models import WorkspaceSettings
+
+    valid_fernet = Fernet.generate_key().decode()
+
+    # 1. Default Gemini model is gemini-3.5-flash-lite across Settings, ORM, and GeminiClient
+    dev_cfg = Settings(_env_file=None, APP_ENV="development", REQUIRE_AUTH=False)
+    assert dev_cfg.GEMINI_MODEL == "gemini-3.5-flash-lite"
+    assert WorkspaceSettings.gemini_model.default.arg == "gemini-3.5-flash-lite"
+    assert GeminiClient(api_key="test-key").model == "gemini-3.5-flash-lite"
+
+    # 2. REQUIRE_AUTH=false emits an explicit startup warning
+    with caplog.at_level("WARNING", logger="releaseguard.main"):
+        validate_startup_auth(dev_cfg, allow_test_bypass=False)
+    assert any("REQUIRE_AUTH=false" in rec.message for rec in caplog.records)
+
+    # 3. REQUIRE_AUTH=true without operator password or GitHub OAuth fails fast at startup
+    unconfigured_auth_cfg = Settings(
+        _env_file=None,
+        APP_ENV="staging",
+        ENCRYPTION_KEY=valid_fernet,
+        REQUIRE_AUTH=True,
+        AUTH_OPERATOR_PASSWORD="",
+        GITHUB_CLIENT_ID="",
+        GITHUB_CLIENT_SECRET="",
+    )
+    with pytest.raises(RuntimeError, match="REQUIRE_AUTH=true requires at least one sign-in method"):
+        validate_startup_auth(unconfigured_auth_cfg, allow_test_bypass=False)
+
+    # 4. Succeeds when AUTH_OPERATOR_PASSWORD or GitHub OAuth is configured
+    pw_cfg = Settings(
+        _env_file=None,
+        APP_ENV="production",
+        ENCRYPTION_KEY=valid_fernet,
+        SECRET_KEY="strong-prod-secret-value-1234567890",
+        EVENT_INGEST_KEY="custom-prod-ingest-key-xyz",
+        REQUIRE_AUTH=True,
+        AUTH_OPERATOR_PASSWORD="strong-operator-password",
+    )
+    validate_startup_auth(pw_cfg, allow_test_bypass=False)
+
+    oauth_cfg = Settings(
+        _env_file=None,
+        APP_ENV="staging",
+        ENCRYPTION_KEY=valid_fernet,
+        REQUIRE_AUTH=True,
+        GITHUB_CLIENT_ID="gh-client-id",
+        GITHUB_CLIENT_SECRET="gh-client-secret",
+    )
+    validate_startup_auth(oauth_cfg, allow_test_bypass=False)
+
+    # 5. Test bypass keeps create_app(APP_ENV='test') working cleanly
+    test_cfg = Settings(_env_file=None, APP_ENV="test", REQUIRE_AUTH=True)
+    validate_startup_auth(test_cfg, allow_test_bypass=True)
+
+    # 6. Conditional create_all guard: skip for Alembic-managed Postgres, allow for dev SQLite/test
+    pg_dev_cfg = Settings(
+        _env_file=None,
+        APP_ENV="development",
+        USE_SQLITE_FALLBACK=False,
+        DATABASE_URL="postgresql+asyncpg://u:p@postgres:5432/rg",
+    )
+    assert should_create_tables_on_startup(pg_dev_cfg, has_explicit_engine=False) is False
+    assert should_create_tables_on_startup(pw_cfg, has_explicit_engine=False) is False
+    sqlite_dev_cfg = Settings(_env_file=None, APP_ENV="development", USE_SQLITE_FALLBACK=True)
+    assert should_create_tables_on_startup(sqlite_dev_cfg, has_explicit_engine=False) is True
+    assert should_create_tables_on_startup(pg_dev_cfg, has_explicit_engine=True) is True

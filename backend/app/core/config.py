@@ -51,10 +51,11 @@ class Settings(BaseSettings):
     )
     USE_SQLITE_FALLBACK: bool = False
     SQLITE_FALLBACK_URL: str = "sqlite+aiosqlite:///./releaseguard_local.db"
+    AUTO_CREATE_TABLES: bool = False
 
     # --- Gemini AI Orchestrator (15-16) ---
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_MODEL: str = "gemini-3.5-flash-lite"
 
     # --- GitHub Integration (17-20) ---
     GITHUB_CLIENT_ID: str = ""
@@ -182,6 +183,13 @@ class Settings(BaseSettings):
     def database_backend(self) -> str:
         """Return 'sqlite' or 'postgresql' for health reporting."""
         return "sqlite" if self.is_sqlite else "postgresql"
+
+    @property
+    def has_auth_provider(self) -> bool:
+        """True when operator password or GitHub OAuth credentials are configured."""
+        has_password = bool(self.AUTH_OPERATOR_PASSWORD.strip())
+        has_oauth = bool(self.GITHUB_CLIENT_ID.strip() and self.GITHUB_CLIENT_SECRET.strip())
+        return has_password or has_oauth
 
     @property
     def flagsmith_project_id_int(self) -> int | None:

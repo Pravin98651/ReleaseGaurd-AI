@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -15,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from app.api.deps import resolve_session_factory
 from app.api.v1 import api_v1_router, system_router
 from app.api.v1.errors import register_exception_handlers
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.database import Base, dispose_engine, get_engine
 from app.core.logging import configure_logging
 from app.core.security import encrypt_token, hash_password, make_token_hint
@@ -28,6 +29,36 @@ from app.models import (
     UserRole,
 )
 from app.services.policy_engine import PolicyEngine
+
+logger = logging.getLogger("releaseguard.main")
+
+
+def validate_startup_auth(cfg: Settings, *, allow_test_bypass: bool = True) -> None:
+    """Validate Control Plane auth settings at startup and warn on open dev mode."""
+    if not cfg.REQUIRE_AUTH:
+        logger.warning(
+            "REQUIRE_AUTH=false: Control Plane authentication is disabled (opt-in dev/demo mode). "
+            "Set REQUIRE_AUTH=true and configure AUTH_OPERATOR_PASSWORD or GitHub OAuth before exposing this service."
+        )
+        return
+
+    if allow_test_bypass and cfg.APP_ENV == "test":
+        return
+
+    if not cfg.has_auth_provider:
+        raise RuntimeError(
+            "REQUIRE_AUTH=true requires at least one sign-in method configured at startup: "
+            "set AUTH_OPERATOR_PASSWORD or both GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET."
+        )
+
+
+def should_create_tables_on_startup(cfg: Settings, *, has_explicit_engine: bool) -> bool:
+    """Return True only for test engines, dev SQLite fallback, or explicit non-prod opt-in."""
+    if has_explicit_engine or cfg.APP_ENV == "test":
+        return True
+    if cfg.APP_ENV == "production":
+        return False
+    return cfg.is_sqlite or cfg.AUTO_CREATE_TABLES
 
 
 async def bootstrap_workspace_defaults(
@@ -134,9 +165,18 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app_instance: FastAPI) -> AsyncIterator[None]:
         configure_logging(cfg.LOG_LEVEL)
-        active_engine = getattr(app_instance.state, "engine", None) or get_engine()
-        async with active_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
+        validate_startup_auth(cfg)
+        explicit_engine = getattr(app_instance.state, "engine", None)
+        active_engine = explicit_engine or get_engine()
+        if should_create_tables_on_startup(cfg, has_explicit_engine=explicit_engine is not None):
+            async with active_engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+        else:
+            logger.info(
+                "Skipping Base.metadata.create_all for %s (%s); relying on Alembic migrations.",
+                cfg.database_backend,
+                cfg.APP_ENV,
+            )
 
         factory = resolve_session_factory(app_instance)
         async with factory() as session:

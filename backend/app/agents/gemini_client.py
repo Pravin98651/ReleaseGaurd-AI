@@ -242,7 +242,7 @@ class GeminiClient:
     ) -> None:
         cfg = get_settings()
         self.api_key = (api_key if api_key is not None else cfg.GEMINI_API_KEY).strip()
-        self.model = (model if model is not None else cfg.GEMINI_MODEL).strip() or "gemini-2.5-flash"
+        self.model = (model if model is not None else cfg.GEMINI_MODEL).strip() or "gemini-3.5-flash-lite"
         self._raw_client = raw_client
         self.max_retries = max(0, max_retries)
         self.retry_delay_base = max(0.0, retry_delay_base)
@@ -275,7 +275,7 @@ class GeminiClient:
     ) -> Any:
         """Invoke google-genai `models.generate_content` with AFC strictly disabled."""
         client = self._resolve_client()
-        active_model = (model or self.model).strip() or "gemini-2.5-flash"
+        active_model = (model or self.model).strip() or "gemini-3.5-flash-lite"
 
         if isinstance(contents, list) and contents and isinstance(contents[0], dict):
             prepared_contents: Any = dict_contents_to_genai(contents)  # type: ignore[arg-type]
@@ -354,7 +354,6 @@ class GeminiClient:
             "gemini-3.5-flash-lite",
             "gemini-3.8-flash",
             "gemini-3.1-flash-lite",
-            "gemini-2.5-flash-lite",
         )
         msg_lower = str(last_exc).lower() if last_exc is not None else ""
         should_fallback = last_exc is not None and self._raw_client is None and (

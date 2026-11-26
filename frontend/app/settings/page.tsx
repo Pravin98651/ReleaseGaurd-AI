@@ -47,8 +47,7 @@ import { triggerControlPlaneRefresh } from "@/hooks/use-control-plane-status";
 const GEMINI_MODELS = [
   "gemini-3.5-flash-lite",
   "gemini-3.8-flash",
-  "gemini-2.5-flash",
-  "gemini-2.5-pro",
+  "gemini-3.1-flash-lite",
 ];
 
 function SettingsInner() {
@@ -76,7 +75,7 @@ function SettingsInner() {
   const [fsProdKey, setFsProdKey] = useState("");
 
   // Workspace Policy & Thresholds state
-  const [geminiModel, setGeminiModel] = useState("gemini-2.5-flash");
+  const [geminiModel, setGeminiModel] = useState("gemini-3.5-flash-lite");
   const [catBConfirm, setCatBConfirm] = useState(true);
   const [ttlSeconds, setTtlSeconds] = useState(900);
   const [guardrails, setGuardrails] = useState<GuardrailThresholds>({
@@ -110,7 +109,7 @@ function SettingsInner() {
       setSettings(ws);
       setIntegrations(intList.length > 0 ? intList : (ws.integrations ?? []));
       setUsers(userList);
-      setGeminiModel(ws.gemini_model || "gemini-2.5-flash");
+      setGeminiModel(ws.gemini_model || "gemini-3.5-flash-lite");
       setCatBConfirm(ws.category_b_requires_confirmation);
       setTtlSeconds(ws.approval_ttl_seconds || 900);
       if (ws.default_guardrails) {
