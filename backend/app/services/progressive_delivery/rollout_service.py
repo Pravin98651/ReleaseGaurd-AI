@@ -839,6 +839,29 @@ class ProgressiveDeliveryService:
             message=dec.decision_summary,
         )
         if is_final:
+            from app.agents.tools.flag_tools import transition_flag_post_promotion
+            from app.models import FeatureFlag
+
+            flag_obj: FeatureFlag | None = None
+            if rollout.feature_flag_id is not None:
+                flag_obj = await session.get(FeatureFlag, rollout.feature_flag_id)
+            if flag_obj is None:
+                flag_obj = (
+                    await session.execute(
+                        select(FeatureFlag)
+                        .where(FeatureFlag.key == rollout.feature_flag_key)
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+            if flag_obj is not None:
+                await transition_flag_post_promotion(
+                    session,
+                    flag_obj,
+                    source="progressive_rollout_completed",
+                    environment_name=rollout.environment,
+                    exclude_rollout_id=rollout.id,
+                )
+
             await create_notification(
                 session,
                 category=NotificationCategory.ROLLOUT_COMPLETED,

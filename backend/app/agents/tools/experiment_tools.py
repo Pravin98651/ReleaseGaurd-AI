@@ -767,6 +767,17 @@ async def handle_promote_experiment_winner(
     await ctx.sync_flag_from_flagsmith(flag.key, project_id=flag.flagsmith_project_id)
     exp.status = ExperimentStatus.COMPLETED
     exp.ended_at = utcnow()
+
+    from app.agents.tools.flag_tools import transition_flag_post_promotion
+
+    dep_report = await transition_flag_post_promotion(
+        ctx.session,
+        flag,
+        source="experiment_winner_promoted",
+        environment_name=exp.environment_name,
+        winning_variation=winner,
+        exclude_experiment_id=exp.id,
+    )
     await ctx.session.commit()
     await ctx.session.refresh(exp)
 
@@ -778,6 +789,8 @@ async def handle_promote_experiment_winner(
         "verified": verified,
         "verification": verification,
         "status": exp.status.value,
+        "flag_lifecycle_status": flag.lifecycle_status.value,
+        "cleanup_dependency_check": dep_report.model_dump(mode="json"),
     }
 
 

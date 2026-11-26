@@ -17,6 +17,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from app.models.enums import FlagLifecycleStatus
+
 
 class HealthIssueType(StrEnum):
     """Seven deterministic Flag Health detectors."""
@@ -741,4 +743,110 @@ def scan_project_flag_health(
         flags=results,
         unregistered_code_flags=unregistered_issues,
         code_references_by_flag=scanned_refs,
+    )
+
+
+FLAG_LIFECYCLE_TRANSITIONS: dict[FlagLifecycleStatus, frozenset[FlagLifecycleStatus]] = {
+    FlagLifecycleStatus.PROPOSED: frozenset(
+        {FlagLifecycleStatus.PROPOSED, FlagLifecycleStatus.CREATED, FlagLifecycleStatus.ACTIVE}
+    ),
+    FlagLifecycleStatus.CREATED: frozenset(
+        {
+            FlagLifecycleStatus.CREATED,
+            FlagLifecycleStatus.ACTIVE,
+            FlagLifecycleStatus.EXPERIMENTING,
+            FlagLifecycleStatus.PROMOTED,
+            FlagLifecycleStatus.CLEANUP_RECOMMENDED,
+        }
+    ),
+    FlagLifecycleStatus.ACTIVE: frozenset(
+        {
+            FlagLifecycleStatus.ACTIVE,
+            FlagLifecycleStatus.EXPERIMENTING,
+            FlagLifecycleStatus.PROMOTED,
+            FlagLifecycleStatus.CLEANUP_RECOMMENDED,
+            FlagLifecycleStatus.CLEANUP_PR_CREATED,
+        }
+    ),
+    FlagLifecycleStatus.EXPERIMENTING: frozenset(
+        {
+            FlagLifecycleStatus.EXPERIMENTING,
+            FlagLifecycleStatus.ACTIVE,
+            FlagLifecycleStatus.PROMOTED,
+            FlagLifecycleStatus.CLEANUP_RECOMMENDED,
+        }
+    ),
+    FlagLifecycleStatus.PROMOTED: frozenset(
+        {
+            FlagLifecycleStatus.PROMOTED,
+            FlagLifecycleStatus.CLEANUP_RECOMMENDED,
+            FlagLifecycleStatus.CLEANUP_PR_CREATED,
+        }
+    ),
+    FlagLifecycleStatus.CLEANUP_RECOMMENDED: frozenset(
+        {
+            FlagLifecycleStatus.CLEANUP_RECOMMENDED,
+            FlagLifecycleStatus.CLEANUP_PR_CREATED,
+            FlagLifecycleStatus.CLEANUP_APPROVED,
+        }
+    ),
+    FlagLifecycleStatus.CLEANUP_PR_CREATED: frozenset(
+        {
+            FlagLifecycleStatus.CLEANUP_PR_CREATED,
+            FlagLifecycleStatus.CLEANUP_APPROVED,
+            FlagLifecycleStatus.CLEANED_UP,
+        }
+    ),
+    FlagLifecycleStatus.CLEANUP_APPROVED: frozenset(
+        {FlagLifecycleStatus.CLEANUP_APPROVED, FlagLifecycleStatus.CLEANED_UP}
+    ),
+    FlagLifecycleStatus.CLEANED_UP: frozenset({FlagLifecycleStatus.CLEANED_UP}),
+}
+
+
+def is_valid_flag_lifecycle_transition(
+    current: FlagLifecycleStatus | str,
+    target: FlagLifecycleStatus | str,
+) -> bool:
+    """Return True if transitioning from ``current`` to ``target`` is permitted."""
+    cur_enum = FlagLifecycleStatus(current)
+    tgt_enum = FlagLifecycleStatus(target)
+    return tgt_enum in FLAG_LIFECYCLE_TRANSITIONS.get(cur_enum, frozenset())
+
+
+class FlagDependencyReport(BaseModel):
+    """Result of checking whether a flag is safe to recommend for cleanup."""
+
+    safe_for_cleanup: bool
+    blockers: list[str] = Field(default_factory=list)
+    active_experiments: list[str] = Field(default_factory=list)
+    active_rollouts: list[str] = Field(default_factory=list)
+    partial_environments: list[str] = Field(default_factory=list)
+
+
+def evaluate_flag_cleanup_readiness(
+    *,
+    active_experiments: list[str] | None = None,
+    active_rollouts: list[str] | None = None,
+    partial_environments: list[str] | None = None,
+) -> FlagDependencyReport:
+    """Determine whether a promoted/completed flag is safe to recommend for cleanup."""
+    exps = list(active_experiments or [])
+    rollouts = list(active_rollouts or [])
+    partials = list(partial_environments or [])
+    blockers: list[str] = []
+    if exps:
+        blockers.append(f"Active experiment(s) still running: {', '.join(exps)}")
+    if rollouts:
+        blockers.append(f"Active progressive rollout(s) in progress: {', '.join(rollouts)}")
+    if partials:
+        blockers.append(
+            f"Partial rollout (<100%) still active in environment(s): {', '.join(partials)}"
+        )
+    return FlagDependencyReport(
+        safe_for_cleanup=not blockers,
+        blockers=blockers,
+        active_experiments=exps,
+        active_rollouts=rollouts,
+        partial_environments=partials,
     )

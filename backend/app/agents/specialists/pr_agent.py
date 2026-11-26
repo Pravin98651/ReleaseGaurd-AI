@@ -985,56 +985,352 @@ async def generate_context_aware_flag_patch(
     )
 
 
+def _remove_flag_from_python_source(
+    source: str,
+    *,
+    flag_key: str,
+    keep_enabled: bool,
+    winning_variation: str | None = None,
+) -> str:
+    """Deterministically remove Flagsmith evaluations for ``flag_key`` in Python source."""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return source
+
+    lines = source.splitlines(keepends=True)
+
+    def _is_flag_call(node: ast.AST) -> str | None:
+        if not isinstance(node, ast.Call):
+            return None
+        func = node.func
+        method_name = (
+            func.attr
+            if isinstance(func, ast.Attribute)
+            else func.id
+            if isinstance(func, ast.Name)
+            else None
+        )
+        if method_name not in ("is_feature_enabled", "get_feature_value"):
+            return None
+        for arg in node.args:
+            if isinstance(arg, ast.Constant) and arg.value == flag_key:
+                return method_name
+        for kw in node.keywords:
+            if (
+                kw.arg in ("feature_name", "feature_key", "flag_key", "key")
+                and isinstance(kw.value, ast.Constant)
+                and kw.value.value == flag_key
+            ):
+                return method_name
+        return None
+
+    def _eval_flag_test(test: ast.AST) -> bool | None:
+        if _is_flag_call(test) == "is_feature_enabled":
+            return keep_enabled
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            inner = _eval_flag_test(test.operand)
+            return None if inner is None else (not inner)
+        if isinstance(test, ast.Compare) and len(test.ops) == 1 and len(test.comparators) == 1:
+            left_call = _is_flag_call(test.left)
+            comp = test.comparators[0]
+            if left_call == "get_feature_value" and isinstance(comp, ast.Constant) and isinstance(comp.value, str):
+                target_val = winning_variation if winning_variation is not None else ("enabled" if keep_enabled else "disabled")
+                if isinstance(test.ops[0], ast.Eq):
+                    return comp.value == target_val
+                if isinstance(test.ops[0], ast.NotEq):
+                    return comp.value != target_val
+        return None
+
+    # 1. Replace top-level/nested `if` statements whose condition directly tests `flag_key`
+    edits: list[tuple[int, int, str]] = []  # (start_line_1idx, end_line_1idx, replacement_text)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.If):
+            decision = _eval_flag_test(node.test)
+            if decision is None:
+                continue
+            chosen = node.body if decision else node.orelse
+            if_indent = " " * node.col_offset
+            if not chosen:
+                edits.append((node.lineno, node.end_lineno or node.lineno, ""))
+            elif len(chosen) == 1 and isinstance(chosen[0], ast.If) and not decision:
+                # elif chain: dedent the inner If to `if_indent`
+                inner_if = chosen[0]
+                inner_start = inner_if.lineno - 1
+                inner_end = inner_if.end_lineno or inner_if.lineno
+                inner_lines = lines[inner_start:inner_end]
+                dedent_amt = max(0, inner_if.col_offset - node.col_offset)
+                reindented = []
+                for idx, ln in enumerate(inner_lines):
+                    stripped = ln[dedent_amt:] if len(ln) >= dedent_amt and ln[:dedent_amt].isspace() else ln
+                    if idx == 0 and stripped.lstrip().startswith("elif "):
+                        stripped = if_indent + "if " + stripped.lstrip()[5:]
+                    reindented.append(stripped)
+                edits.append((node.lineno, node.end_lineno or node.lineno, "".join(reindented)))
+            else:
+                body_start = chosen[0].lineno - 1
+                body_end = chosen[-1].end_lineno or chosen[-1].lineno
+                body_lines = lines[body_start:body_end]
+                min_indent = min(
+                    (len(ln) - len(ln.lstrip(" ")) for ln in body_lines if ln.strip()),
+                    default=node.col_offset + 4,
+                )
+                dedent_amt = max(0, min_indent - node.col_offset)
+                reindented = [
+                    (ln[dedent_amt:] if len(ln) >= dedent_amt and ln[:dedent_amt].isspace() else ln)
+                    for ln in body_lines
+                ]
+                edits.append((node.lineno, node.end_lineno or node.lineno, "".join(reindented)))
+
+    if edits:
+        # Apply non-overlapping outermost edits from bottom to top
+        edits.sort(key=lambda e: (e[0], -(e[1])))
+        filtered_edits: list[tuple[int, int, str]] = []
+        for start, end, repl in edits:
+            if not any(s <= start and end <= e for s, e, _ in filtered_edits):
+                filtered_edits.append((start, end, repl))
+        for start, end, repl in sorted(filtered_edits, key=lambda e: e[0], reverse=True):
+            lines[start - 1 : end] = [repl] if repl else []
+        source = "".join(lines)
+
+    # 2. Replace any remaining inline SDK calls for `flag_key`
+    bool_literal = "True" if keep_enabled else "False"
+    val_literal = repr(winning_variation) if winning_variation is not None else repr("enabled" if keep_enabled else "disabled")
+    escaped_key = re.escape(flag_key)
+    source = re.sub(
+        rf"""(?:[A-Za-z_]\w*\.)?is_feature_enabled\(\s*['"]{escaped_key}['"]\s*\)""",
+        bool_literal,
+        source,
+    )
+    source = re.sub(
+        rf"""(?:[A-Za-z_]\w*\.)?get_feature_value\(\s*['"]{escaped_key}['"]\s*\)""",
+        val_literal,
+        source,
+    )
+
+    # 3. Remove unused `flags = ...get_identity_flags(...)` assignment if `flags` is no longer referenced
+    try:
+        updated_tree = ast.parse(source)
+        name_counts: dict[str, int] = {}
+        for n in ast.walk(updated_tree):
+            if isinstance(n, ast.Name):
+                name_counts[n.id] = name_counts.get(n.id, 0) + 1
+        if name_counts.get("flags", 0) == 1:
+            source = re.sub(
+                r"^[ \t]*flags\s*=\s*[^\n]*get_identity_flags\([^\n]*\)\n?",
+                "",
+                source,
+                flags=re.MULTILINE,
+            )
+    except SyntaxError:
+        pass
+
+    return source
+
+
+def _remove_flag_from_ts_source(
+    source: str,
+    *,
+    flag_key: str,
+    keep_enabled: bool,
+    winning_variation: str | None = None,
+) -> str:
+    """Deterministically remove Flagsmith evaluations for ``flag_key`` in TS/TSX/JS/JSX."""
+    escaped_key = re.escape(flag_key)
+    bool_literal = "true" if keep_enabled else "false"
+    val_literal = json.dumps(
+        winning_variation if winning_variation is not None else ("enabled" if keep_enabled else "disabled")
+    )
+
+    # Unwrap simple `if (flagsmith.hasFeature("key")) { A } else { B }` blocks
+    if_else_pat = re.compile(
+        rf"""if\s*\(\s*(?:[\w$.]+\??\.)?hasFeature\(\s*['"`]{escaped_key}['"`]\s*\)\s*\)\s*\{{([^{{}}]*)\}}\s*else\s*\{{([^{{}}]*)\}}""",
+        re.DOTALL,
+    )
+    source = if_else_pat.sub(
+        lambda m: (m.group(1) if keep_enabled else m.group(2)).strip(),
+        source,
+    )
+
+    # Replace remaining inline calls
+    source = re.sub(
+        rf"""(?:[\w$.]+\??\.)?hasFeature\(\s*['"`]{escaped_key}['"`]\s*\)""",
+        bool_literal,
+        source,
+    )
+    source = re.sub(
+        rf"""(?:[\w$.]+\??\.)?getValue\(\s*['"`]{escaped_key}['"`]\s*\)""",
+        val_literal,
+        source,
+    )
+    return source
+
+
 def generate_cleanup_patch_payload(
     *,
     flag_key: str,
     keep_branch: str,
     code_references: list[dict[str, Any]] | None = None,
+    base_files: dict[str, str] | None = None,
+    winning_variation: str | None = None,
 ) -> dict[str, Any]:
-    """Generate a validated flag-cleanup removal patch keeping the selected branch."""
+    """Generate a validated flag-cleanup removal patch editing real Python/TS/TSX references."""
     safe_key = re.sub(r"[^a-zA-Z0-9_]", "_", flag_key).strip("_") or "stale_flag"
     keep_enabled = keep_branch == "enabled"
-    target_path = f"app/flags/{safe_key}_cleanup.py"
-    if code_references:
-        first_ref = str(code_references[0].get("file_path") or "")
-        if first_ref.endswith(".py"):
-            target_path = first_ref
+    base_map = dict(base_files or {})
 
-    after_code = (
-        f'"""Cleanup module removing retired Flagsmith flag `{flag_key}`."""\n\n'
-        f"RETIRED_FLAG_KEY = {flag_key!r}\n"
-        f"PERMANENT_BEHAVIOR_ENABLED = {keep_enabled!r}\n\n\n"
-        f"def is_{safe_key}_active() -> bool:\n"
-        f'    """Flag `{flag_key}` permanently resolved to {keep_branch}."""\n'
-        "    return PERMANENT_BEHAVIOR_ENABLED\n"
-    )
-    import_block = _build_python_import_block(target_path, f"is_{safe_key}_active")
-    test_content = (
-        f'"""Cleanup verification test for retired flag `{flag_key}`."""\n\n'
-        f"{import_block}\n\n\n"
-        f"def test_{safe_key}_cleanup_resolved() -> None:\n"
-        f"    assert is_{safe_key}_active() is {keep_enabled!r}\n"
-    )
+    ref_paths: list[str] = []
+    for ref in code_references or []:
+        fp = str(ref.get("file_path") or "").strip().lstrip("/")
+        if fp and fp not in ref_paths:
+            ref_paths.append(fp)
 
-    return {
-        "title": f"chore(flags): remove retired flag `{flag_key}` (keep {keep_branch})",
-        "description": (
-            f"Removes `{flag_key}` runtime conditional branching while retaining the "
-            f"`{keep_branch}` execution path. Flagsmith flag is NOT auto-deleted."
-        ),
-        "files_diff": [
-            {
-                "file_path": target_path,
-                "action": "create",
-                "before_code": "",
-                "after_code": after_code,
-                "unified_diff": _unified_diff(target_path, "", after_code),
-            }
-        ],
-        "generated_tests": [
+    # Also include any base_files that contain the flag_key even if not in code_references
+    for fp, content in base_map.items():
+        if fp not in ref_paths and flag_key in content:
+            ref_paths.append(fp)
+
+    files_diff: list[dict[str, Any]] = []
+    modified_py_files: list[str] = []
+    for fp in ref_paths:
+        if not _is_safe_relative_patch_path(fp) or fp not in base_map:
+            continue
+        before_code = base_map[fp]
+        if fp.endswith(".py"):
+            after_code = _remove_flag_from_python_source(
+                before_code,
+                flag_key=flag_key,
+                keep_enabled=keep_enabled,
+                winning_variation=winning_variation,
+            )
+            if after_code != before_code and _passes_basic_syntax(fp, after_code):
+                modified_py_files.append(fp)
+                files_diff.append(
+                    {
+                        "file_path": fp,
+                        "action": "modify",
+                        "before_code": before_code,
+                        "after_code": after_code,
+                        "unified_diff": _unified_diff(fp, before_code, after_code),
+                    }
+                )
+        elif fp.endswith((".ts", ".tsx", ".js", ".jsx")):
+            after_code = _remove_flag_from_ts_source(
+                before_code,
+                flag_key=flag_key,
+                keep_enabled=keep_enabled,
+                winning_variation=winning_variation,
+            )
+            if after_code != before_code:
+                files_diff.append(
+                    {
+                        "file_path": fp,
+                        "action": "modify",
+                        "before_code": before_code,
+                        "after_code": after_code,
+                        "unified_diff": _unified_diff(fp, before_code, after_code),
+                    }
+                )
+
+    generated_tests: list[dict[str, Any]] = []
+    if modified_py_files:
+        primary_py = modified_py_files[0]
+        test_content = (
+            f'"""Cleanup verification test for retired flag `{flag_key}`."""\n\n'
+            "import py_compile\n"
+            "from pathlib import Path\n\n"
+            f"_TARGET = Path(__file__).resolve().parents[1] / {primary_py!r}\n\n\n"
+            f"def test_{safe_key}_cleanup_removed_flag_references() -> None:\n"
+            "    source = _TARGET.read_text(encoding='utf-8')\n"
+            f"    assert {flag_key!r} not in source\n"
+            "    py_compile.compile(str(_TARGET), doraise=True)\n"
+        )
+        generated_tests.append(
             {
                 "file_path": f"tests/test_{safe_key}_cleanup.py",
                 "content": test_content,
             }
-        ],
+        )
+
+    return {
+        "title": f"chore(flags): remove retired flag `{flag_key}` (keep {keep_branch})",
+        "description": (
+            f"Removes `{flag_key}` runtime conditional branching across {len(files_diff)} file(s) "
+            f"while retaining the `{keep_branch}`"
+            f"{f' ({winning_variation})' if winning_variation else ''} execution path. "
+            "Flagsmith flag is NOT auto-deleted."
+        ),
+        "files_diff": files_diff,
+        "generated_tests": generated_tests,
     }
+
+
+async def generate_cleanup_patch_payload_with_context(
+    *,
+    flag_key: str,
+    keep_branch: str,
+    code_references: list[dict[str, Any]] | None = None,
+    base_files: dict[str, str] | None = None,
+    winning_variation: str | None = None,
+    github_client: Any | None = None,
+    repo_owner: str | None = None,
+    repo_name: str | None = None,
+    ref: str | None = None,
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Fetch real matching files from GitHub when needed and generate a cleanup patch."""
+    resolved_base = dict(base_files or {})
+    if not resolved_base and github_client is not None and repo_owner and repo_name:
+        ref_paths = []
+        for item in code_references or []:
+            fp = str(item.get("file_path") or "").strip().lstrip("/")
+            if fp and fp not in ref_paths:
+                ref_paths.append(fp)
+
+        if not ref_paths:
+            try:
+                tree = await github_client.get_repo_tree(
+                    repo_owner, repo_name, tree_sha=ref or "HEAD", recursive=True
+                )
+                ref_paths = [
+                    str(entry.get("path", ""))
+                    for entry in tree
+                    if entry.get("type") == "blob"
+                    and str(entry.get("path", "")).lower().endswith(
+                        (".py", ".ts", ".tsx", ".js", ".jsx")
+                    )
+                ]
+            except Exception:  # noqa: BLE001
+                ref_paths = []
+
+        for fp in ref_paths:
+            if not _is_safe_relative_patch_path(fp):
+                continue
+            try:
+                info = await github_client.get_file_contents(
+                    repo_owner, repo_name, fp, ref=ref
+                )
+                content = str(info.get("content", ""))
+                if flag_key in content or any(
+                    str(r.get("file_path") or "").lstrip("/") == fp
+                    for r in (code_references or [])
+                ):
+                    resolved_base[fp] = content
+            except Exception as exc:  # noqa: BLE001
+                import logging
+
+                logging.getLogger(__name__).debug(
+                    "Skipping file %s during cleanup patch fetch: %s", fp, exc
+                )
+                continue
+
+    payload = generate_cleanup_patch_payload(
+        flag_key=flag_key,
+        keep_branch=keep_branch,
+        code_references=code_references,
+        base_files=resolved_base,
+        winning_variation=winning_variation,
+    )
+    return payload, resolved_base

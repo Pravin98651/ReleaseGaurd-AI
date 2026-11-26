@@ -106,6 +106,20 @@ class FlagType(StrEnum):
     MULTIVARIATE = "MULTIVARIATE"
 
 
+class FlagLifecycleStatus(StrEnum):
+    """End-to-end feature flag lifecycle states from proposal through cleanup."""
+
+    PROPOSED = "proposed"
+    CREATED = "created"
+    ACTIVE = "active"
+    EXPERIMENTING = "experimenting"
+    PROMOTED = "promoted"
+    CLEANUP_RECOMMENDED = "cleanup_recommended"
+    CLEANUP_PR_CREATED = "cleanup_pr_created"
+    CLEANUP_APPROVED = "cleanup_approved"
+    CLEANED_UP = "cleaned_up"
+
+
 class AnalyticsMode(StrEnum):
     FLAGSMITH_NATIVE = "flagsmith_native"
     TRACKED_EVENT_FALLBACK = "tracked_event_fallback"

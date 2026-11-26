@@ -366,11 +366,34 @@ async def _run_revalidation(
         "flagsmith_set_gradual_rollout_stage",
         "flagsmith_configure_multivariate_split",
         "flagsmith_rollback_flag",
+    ):
+        return await _revalidate_flag_state(ctx, approval)
+
+    if norm in (
         "flagsmith_delete_flag",
         "flagsmith_archive_flag",
         "flagsmith_delete_or_archive_flag",
     ):
-        return await _revalidate_flag_state(ctx, approval)
+        flag_reval = await _revalidate_flag_state(ctx, approval)
+        if not flag_reval.get("ok"):
+            return flag_reval
+        flag_key = str(approval.action_payload.get("flag_key") or "")
+        pid = await ctx.resolve_flagsmith_project_id()
+        flag = await ctx.find_feature_flag(flag_key=flag_key, project_id=pid)
+        if flag is not None:
+            from app.agents.tools.flag_tools import check_flag_retirement_preconditions
+
+            gh_client: Any | None = None
+            try:
+                gh_client = await ctx.get_github_client()
+            except Exception:  # noqa: BLE001
+                gh_client = None
+            pre_ok, pre_details = await check_flag_retirement_preconditions(
+                ctx.session, flag, github_client=gh_client
+            )
+            if not pre_ok:
+                return {"ok": False, "details": pre_details}
+        return flag_reval
 
     if norm in (
         "experiment_activate",
@@ -544,6 +567,14 @@ async def _run_execution(
     if norm in ("flagsmith_delete_or_archive_flag", "flagsmith_delete_flag", "flagsmith_archive_flag"):
         if "action" not in payload:
             payload["action"] = "delete" if "delete" in norm else "archive"
+        flag_key = str(payload.get("flag_key") or "")
+        pid = await ctx.resolve_flagsmith_project_id()
+        flag = await ctx.find_feature_flag(flag_key=flag_key, project_id=pid)
+        if flag is not None:
+            from app.models.enums import FlagLifecycleStatus
+
+            flag.lifecycle_status = FlagLifecycleStatus.CLEANUP_APPROVED
+            await ctx.session.flush()
         args = FlagsmithDeleteOrArchiveFlagInput.model_validate(payload)
         return await handle_flagsmith_delete_or_archive_flag(ctx, args)
 

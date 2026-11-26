@@ -13,8 +13,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.approval_executor import capture_expected_precondition
-from app.agents.specialists.pr_agent import generate_cleanup_patch_payload
+from app.agents.specialists.pr_agent import generate_cleanup_patch_payload_with_context
 from app.agents.tools.flag_tools import (
+    check_flag_retirement_preconditions,
     handle_flagsmith_create_flag,
     handle_flagsmith_rollback_flag,
     handle_flagsmith_set_gradual_rollout_stage,
@@ -53,6 +54,7 @@ from app.models import (
     Experiment,
     ExperimentStatus,
     FeatureFlag,
+    FlagLifecycleStatus,
     PolicyCategory,
     Repository,
     SpecialistRole,
@@ -958,11 +960,46 @@ async def generate_flag_cleanup_pr(
     if repo is None:
         raise APIException(404, "REPOSITORY_NOT_FOUND", f"Repository {body.repository_id} not found.")
 
-    patch_payload = generate_cleanup_patch_payload(
+    ctx = await build_tool_context(request.app, session, user_id=operator.id)
+    gh_client: Any | None = None
+    try:
+        gh_client = await ctx.get_github_client()
+    except Exception:  # noqa: BLE001
+        gh_client = None
+
+    winning_variation = (flag.lifecycle_details or {}).get("winning_variation")
+    patch_payload, resolved_base = await generate_cleanup_patch_payload_with_context(
         flag_key=flag.key,
         keep_branch=body.keep_branch,
         code_references=list(flag.code_references or []),
+        base_files=ctx.repo_base_files,
+        winning_variation=str(winning_variation) if winning_variation else None,
+        github_client=gh_client,
+        repo_owner=repo.owner,
+        repo_name=repo.name,
+        ref=repo.default_branch,
     )
+    if not patch_payload.get("files_diff"):
+        raise APIException(
+            409,
+            "NO_CLEANUP_REFERENCES_FOUND",
+            f"No editable code references found for flag '{flag.key}' in repository '{repo.full_name}'.",
+        )
+
+    if ctx.repo_base_files is None and resolved_base:
+        ctx.repo_base_files = resolved_base
+
+    target_head_sha: str | None = None
+    if gh_client is not None and getattr(gh_client, "token", ""):
+        try:
+            branches = await gh_client.list_branches(repo.owner, repo.name)
+            for b in branches:
+                if b.get("name") == repo.default_branch:
+                    target_head_sha = str((b.get("commit") or {}).get("sha") or "") or None
+                    break
+        except Exception:  # noqa: BLE001
+            target_head_sha = None
+
     change = CodeChange(
         repository_id=repo.id,
         feature_flag_id=flag.id,
@@ -973,12 +1010,12 @@ async def generate_flag_cleanup_pr(
         files_diff=patch_payload["files_diff"],
         generated_tests=patch_payload["generated_tests"],
         validation_status=ValidationStatus.PENDING,
+        validation_report={"target_head_sha": target_head_sha} if target_head_sha else {},
         status=CodeChangeStatus.DRAFT,
     )
     session.add(change)
     await session.flush()
 
-    ctx = await build_tool_context(request.app, session, user_id=operator.id)
     await handle_validate_patch_isolated(ctx, ValidatePatchIsolatedInput(code_change_id=change.id))
     await session.refresh(change)
 
@@ -1029,11 +1066,40 @@ async def generate_flag_cleanup_pr(
             ctx, GitHubCreateBranchAndDraftPRInput.model_validate(action_payload)
         )
         await session.refresh(change)
+        flag.lifecycle_status = FlagLifecycleStatus.CLEANUP_PR_CREATED
+        details = dict(flag.lifecycle_details or {})
+        details.update(
+            {
+                "cleanup_code_change_id": str(change.id),
+                "cleanup_pr_number": change.draft_pr_number,
+                "cleanup_pr_url": change.draft_pr_url,
+                "cleanup_branch_name": change.draft_branch_name,
+                "cleanup_pr_created_at": utcnow().isoformat(),
+            }
+        )
+        flag.lifecycle_details = details
+        await PolicyEngine.record_audit_log(
+            session,
+            actor_type=ActorType.USER,
+            actor_id=str(operator.id),
+            policy_category=PolicyCategory.B,
+            event_action="flag_cleanup.pr_created",
+            resource_type="feature_flag",
+            resource_id=str(flag.id),
+            status=AuditStatus.SUCCESS,
+            details={
+                "flag_key": flag.key,
+                "code_change_id": str(change.id),
+                "draft_pr_number": change.draft_pr_number,
+                "draft_pr_url": change.draft_pr_url,
+            },
+        )
 
     await session.commit()
     return {
         "execution_status": "executed",
         "data": CodeChangeOut.model_validate(change).model_dump(mode="json"),
+        "lifecycle_status": flag.lifecycle_status.value,
     }
 
 
@@ -1051,9 +1117,38 @@ async def request_flag_delete(
         raise APIException(404, "FEATURE_FLAG_NOT_FOUND", f"Feature flag {flag_id} not found.")
 
     ctx = await build_tool_context(request.app, session, user_id=operator.id)
+    gh_client: Any | None = None
+    try:
+        gh_client = await ctx.get_github_client()
+    except Exception:  # noqa: BLE001
+        gh_client = None
+
+    pre_ok, pre_details = await check_flag_retirement_preconditions(
+        session, flag, github_client=gh_client
+    )
+    if not pre_ok:
+        raise APIException(
+            409,
+            "CLEANUP_PRECONDITION_UNMET",
+            (
+                f"Cannot request retirement for flag '{flag.key}': "
+                f"{pre_details.get('remaining_code_references', 0)} code reference(s) remain "
+                "and no merged cleanup PR was found."
+            ),
+            details=pre_details,
+        )
+
+    target_env = (
+        body.environment_name
+        or (flag.lifecycle_details or {}).get("environment_name")
+        or next(iter((flag.env_states or {}).keys()), "production")
+    )
+    env_norm = str(target_env).strip().lower()
+
     action_payload = {
         "flag_key": flag.key,
         "action": body.action,
+        "environment_name": env_norm,
         "reason": body.reason,
     }
     res_type, res_id, expected_pre, env_states = await capture_expected_precondition(
@@ -1066,14 +1161,23 @@ async def request_flag_delete(
         action_type="flagsmith_delete_or_archive_flag",
         target_resource_type=res_type,
         target_resource_id=res_id,
-        environment_name="production",
-        title=f"{body.action.capitalize()} Flagsmith flag '{flag.key}'",
+        environment_name=env_norm,
+        title=f"{body.action.capitalize()} Flagsmith flag '{flag.key}' ({env_norm})",
         rationale=body.reason,
         action_payload=action_payload,
         expected_precondition=expected_pre,
         env_states=env_states,
         requested_by_id=operator.id,
     )
+    details = dict(flag.lifecycle_details or {})
+    details.update(
+        {
+            "cleanup_approval_id": str(approval.id),
+            "retirement_precondition": pre_details,
+            "environment_name": env_norm,
+        }
+    )
+    flag.lifecycle_details = details
     await session.commit()
     await session.refresh(approval)
     return JSONResponse(

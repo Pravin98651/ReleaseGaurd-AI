@@ -21,7 +21,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, JSONBCompat, TZDateTime, utcnow
-from app.models.enums import FlagType, RolloutAction, str_enum
+from app.models.enums import FlagLifecycleStatus, FlagType, RolloutAction, str_enum
 
 if TYPE_CHECKING:
     from app.models.experiments import Experiment
@@ -36,6 +36,7 @@ class FeatureFlag(Base):
     __table_args__ = (
         UniqueConstraint("flagsmith_project_id", "key", name="uq_flag_project_key"),
         Index("ix_flag_health_score", "health_score"),
+        Index("ix_feature_flags_lifecycle_status", "lifecycle_status"),
         CheckConstraint(
             "health_score >= 0 AND health_score <= 100",
             name="health_score_range",
@@ -56,6 +57,15 @@ class FeatureFlag(Base):
         default=FlagType.STANDARD,
     )
     is_archived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    lifecycle_status: Mapped[FlagLifecycleStatus] = mapped_column(
+        str_enum(FlagLifecycleStatus, length=50),
+        nullable=False,
+        default=FlagLifecycleStatus.ACTIVE,
+        server_default="active",
+    )
+    lifecycle_details: Mapped[dict[str, Any]] = mapped_column(
+        JSONBCompat, nullable=False, default=dict
+    )
     env_states: Mapped[dict[str, Any]] = mapped_column(JSONBCompat, nullable=False, default=dict)
     mv_options: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONBCompat, nullable=False, default=list

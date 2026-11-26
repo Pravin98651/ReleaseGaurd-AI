@@ -2,26 +2,38 @@
 
 from __future__ import annotations
 
+import asyncio
+import uuid
 from datetime import timedelta
 from typing import Any
 
 from sqlalchemy import func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.tools.context import ToolExecutionContext
 from app.analytics.flag_health import (
+    FlagDependencyReport,
     FlagHealthInput,
+    evaluate_flag_cleanup_readiness,
     scan_files_for_flag_references,
     scan_project_flag_health,
 )
 from app.core.database import utcnow
 from app.core.security import make_token_hint
 from app.models import (
+    CodeChange,
+    CodeChangeType,
     Experiment,
     ExperimentEvent,
     ExperimentEventType,
     ExperimentStatus,
     FeatureFlag,
+    FlagLifecycleStatus,
     FlagType,
+    ProgressiveRollout,
+    ProgressiveRolloutStatus,
+    PullRequest,
+    PullRequestState,
     Repository,
     RolloutAction,
 )
@@ -504,18 +516,45 @@ async def handle_scan_flag_health(
             tree = await client.get_repo_tree(
                 repo.owner, repo.name, tree_sha=repo.default_branch, recursive=True
             )
-            file_map: dict[str, str] = {}
-            for entry in tree:
-                path = str(entry.get("path", ""))
-                if entry.get("type") == "blob" and path.lower().endswith(
+            ignored_prefixes = (
+                "node_modules/",
+                ".venv/",
+                "venv/",
+                "dist/",
+                "build/",
+                ".next/",
+                "__pycache__/",
+                ".git/",
+            )
+            candidate_paths = [
+                str(entry.get("path", ""))
+                for entry in tree
+                if entry.get("type") == "blob"
+                and str(entry.get("path", "")).lower().endswith(
                     (".py", ".ts", ".tsx", ".js", ".jsx")
-                ):
-                    info = await client.get_file_contents(
-                        repo.owner, repo.name, path, ref=repo.default_branch
-                    )
-                    file_map[path] = str(info.get("content", ""))
-                if len(file_map) >= 40:
-                    break
+                )
+                and not any(
+                    str(entry.get("path", "")).startswith(prefix)
+                    or f"/{prefix}" in str(entry.get("path", ""))
+                    for prefix in ignored_prefixes
+                )
+            ]
+            sem = asyncio.Semaphore(10)
+
+            async def _fetch_blob(path: str) -> tuple[str, str | None]:
+                async with sem:
+                    try:
+                        info = await client.get_file_contents(
+                            repo.owner, repo.name, path, ref=repo.default_branch
+                        )
+                        return path, str(info.get("content", ""))
+                    except Exception:  # noqa: BLE001
+                        return path, None
+
+            fetched = await asyncio.gather(*(_fetch_blob(p) for p in candidate_paths))
+            file_map: dict[str, str] = {
+                path: content for path, content in fetched if content is not None
+            }
             refs = scan_files_for_flag_references(file_map)
             scanned_refs_by_flag = {
                 k: [r.model_dump(mode="json") for r in v] for k, v in refs.items()
@@ -612,12 +651,194 @@ async def handle_flagsmith_delete_or_archive_flag(
         await client.archive_flag(flag.flagsmith_project_id, int(flag.flagsmith_feature_id))
         flag.is_archived = True
 
+    flag.lifecycle_status = FlagLifecycleStatus.CLEANED_UP
+    details = dict(flag.lifecycle_details or {})
+    details.update(
+        {
+            "retirement_action": args.action,
+            "retirement_reason": args.reason,
+            "cleaned_up_at": utcnow().isoformat(),
+        }
+    )
+    flag.lifecycle_details = details
+
     await ctx.session.commit()
     return FlagsmithDeleteOrArchiveFlagOutput(
         flag_key=args.flag_key,
         action=args.action,
         completed=True,
     ).model_dump(mode="json")
+
+
+async def transition_flag_post_promotion(
+    session: AsyncSession,
+    flag: FeatureFlag,
+    *,
+    source: str,
+    environment_name: str | None = None,
+    winning_variation: str | None = None,
+    exclude_experiment_id: uuid.UUID | None = None,
+    exclude_rollout_id: uuid.UUID | None = None,
+) -> FlagDependencyReport:
+    """Inspect flag dependencies after promotion/100% rollout and transition lifecycle state."""
+    exp_stmt = select(Experiment).where(
+        Experiment.feature_flag_id == flag.id,
+        Experiment.status.in_([ExperimentStatus.RUNNING, ExperimentStatus.PAUSED]),
+    )
+    if exclude_experiment_id is not None:
+        exp_stmt = exp_stmt.where(Experiment.id != exclude_experiment_id)
+    active_exps = [
+        e.name for e in (await session.execute(exp_stmt)).scalars().all()
+    ]
+
+    terminal_rollouts = {
+        ProgressiveRolloutStatus.COMPLETED,
+        ProgressiveRolloutStatus.ROLLED_BACK,
+        ProgressiveRolloutStatus.CANCELLED,
+    }
+    rollout_stmt = select(ProgressiveRollout).where(
+        ProgressiveRollout.feature_flag_key == flag.key,
+    )
+    if exclude_rollout_id is not None:
+        rollout_stmt = rollout_stmt.where(ProgressiveRollout.id != exclude_rollout_id)
+    active_rollouts = [
+        f"{r.rollout_key} ({r.environment})"
+        for r in (await session.execute(rollout_stmt)).scalars().all()
+        if r.status not in terminal_rollouts
+    ]
+
+    partial_envs: list[str] = []
+    target_env_norm = environment_name.strip().lower() if environment_name else None
+    for env_name, st in (flag.env_states or {}).items():
+        if not isinstance(st, dict):
+            continue
+        if target_env_norm and env_name.strip().lower() == target_env_norm:
+            continue
+        pct = st.get("rollout_percentage")
+        if pct is not None and 0 < int(pct) < 100:
+            partial_envs.append(env_name)
+
+    report = evaluate_flag_cleanup_readiness(
+        active_experiments=active_exps,
+        active_rollouts=active_rollouts,
+        partial_environments=partial_envs,
+    )
+
+    terminal_cleanup_states = {
+        FlagLifecycleStatus.CLEANUP_PR_CREATED,
+        FlagLifecycleStatus.CLEANUP_APPROVED,
+        FlagLifecycleStatus.CLEANED_UP,
+    }
+    if flag.lifecycle_status not in terminal_cleanup_states:
+        flag.lifecycle_status = (
+            FlagLifecycleStatus.CLEANUP_RECOMMENDED
+            if report.safe_for_cleanup
+            else FlagLifecycleStatus.PROMOTED
+        )
+
+    details = dict(flag.lifecycle_details or {})
+    details.update(
+        {
+            "cleanup_ready": report.safe_for_cleanup,
+            "blockers": report.blockers,
+            "active_experiments": report.active_experiments,
+            "active_rollouts": report.active_rollouts,
+            "partial_environments": report.partial_environments,
+            "promotion_source": source,
+            "checked_at": utcnow().isoformat(),
+        }
+    )
+    if environment_name:
+        details["environment_name"] = environment_name.strip().lower()
+    if winning_variation:
+        details["winning_variation"] = winning_variation
+    flag.lifecycle_details = details
+    return report
+
+
+async def check_flag_retirement_preconditions(
+    session: AsyncSession,
+    flag: FeatureFlag,
+    *,
+    github_client: Any | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """Verify cleanup PR is merged OR 0 code references remain before allowing retirement."""
+    remaining_refs = len(flag.code_references or [])
+    if remaining_refs == 0:
+        return True, {
+            "reason": "zero_code_references",
+            "remaining_code_references": 0,
+            "merged_cleanup_pr": False,
+        }
+
+    cleanup_changes = list(
+        (
+            await session.execute(
+                select(CodeChange).where(
+                    CodeChange.feature_flag_id == flag.id,
+                    CodeChange.change_type == CodeChangeType.FLAG_CLEANUP,
+                    CodeChange.draft_pr_number.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    open_prs: list[int] = []
+    for change in cleanup_changes:
+        if change.draft_pr_number is None:
+            continue
+        open_prs.append(int(change.draft_pr_number))
+        if (change.validation_report or {}).get("cleanup_pr_merged") is True:
+            return True, {
+                "reason": "cleanup_pr_merged",
+                "merged_pr_number": int(change.draft_pr_number),
+                "remaining_code_references": remaining_refs,
+            }
+
+        pr_row = (
+            await session.execute(
+                select(PullRequest)
+                .where(
+                    PullRequest.repository_id == change.repository_id,
+                    PullRequest.github_pr_number == int(change.draft_pr_number),
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if pr_row is not None and pr_row.state == PullRequestState.MERGED:
+            return True, {
+                "reason": "cleanup_pr_merged",
+                "merged_pr_number": int(change.draft_pr_number),
+                "remaining_code_references": remaining_refs,
+            }
+
+        if github_client is not None and getattr(github_client, "token", ""):
+            repo = await session.get(Repository, change.repository_id)
+            if repo is not None:
+                try:
+                    live_pr = await github_client.get_pull_request(
+                        repo.owner, repo.name, int(change.draft_pr_number)
+                    )
+                    if bool(live_pr.get("merged")):
+                        return True, {
+                            "reason": "cleanup_pr_merged",
+                            "merged_pr_number": int(change.draft_pr_number),
+                            "remaining_code_references": remaining_refs,
+                        }
+                except Exception:  # noqa: BLE001
+                    return False, {
+                        "reason": "unmerged_cleanup_pr_or_remaining_references",
+                        "remaining_code_references": remaining_refs,
+                        "open_cleanup_prs": open_prs,
+                    }
+
+    return False, {
+        "reason": "unmerged_cleanup_pr_or_remaining_references",
+        "remaining_code_references": remaining_refs,
+        "open_cleanup_prs": open_prs,
+    }
 
 
 FLAG_TOOL_HANDLERS: dict[str, Any] = {

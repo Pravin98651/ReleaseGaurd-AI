@@ -8,7 +8,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.models.enums import FlagType
+from app.models.enums import FlagLifecycleStatus, FlagType
 from app.schemas.common import ORMBaseModel
 
 
@@ -55,6 +55,8 @@ class FeatureFlagOut(ORMBaseModel):
     description: str | None = None
     flag_type: FlagType
     is_archived: bool
+    lifecycle_status: FlagLifecycleStatus = FlagLifecycleStatus.ACTIVE
+    lifecycle_details: dict[str, Any] = Field(default_factory=dict)
     env_states: dict[str, Any] = Field(default_factory=dict)
     mv_options: list[dict[str, Any]] = Field(default_factory=list)
     code_references: list[dict[str, Any]] = Field(default_factory=list)
@@ -152,4 +154,5 @@ class FlagDeleteRequest(BaseModel):
     """Category C request to archive or delete a Flagsmith flag (never auto-executed)."""
 
     action: Literal["archive", "delete"] = "archive"
+    environment_name: str | None = Field(default=None, min_length=1, max_length=64)
     reason: str = Field(min_length=1)
