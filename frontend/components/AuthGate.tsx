@@ -95,7 +95,7 @@ export function AuthGate({
 
   return (
     <div className="flex min-h-[75vh] items-center justify-center p-4">
-      <div className="w-full max-w-md rounded-2xl border border-slate-800 bg-[#0d1119] p-6 shadow-2xl space-y-5">
+      <div className="w-full max-w-md rounded-2xl border border-white/5 bg-[#171c2a] p-6 shadow-[7px_7px_15px_rgba(6,8,14,0.72),-5px_-5px_12px_rgba(36,44,66,0.42)] space-y-5">
         <div className="flex items-center gap-3">
           <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-indigo-500/40 bg-indigo-500/15 text-indigo-300">
             <ShieldCheck className="h-5 w-5" />

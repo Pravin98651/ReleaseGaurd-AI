@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.checkout import process_checkout
@@ -386,6 +386,32 @@ def create_app(
             total_buffered=telem.total_buffered,
             releaseguard_api_url=app_cfg.RELEASEGUARD_API_URL,
         )
+
+    @app.post("/api/auth/login")
+    async def shopper_login(payload: dict[str, Any]) -> dict[str, Any]:
+        """Demo shopper sign-in binding account identity & traits for Flagsmith targeting."""
+        raw_id = str(payload.get("email_or_id") or payload.get("identifier") or "").strip()
+        password = str(payload.get("password") or "")
+        if not raw_id or len(password) < 4:
+            raise HTTPException(
+                status_code=422,
+                detail="Shopper email/ID and a password (min 4 chars) are required.",
+            )
+        user_id = raw_id.split("@")[0].strip().lower().replace(" ", "_") or "shopper_42"
+        user_type = str(payload.get("user_type") or "consumer").strip().lower()
+        subscription_plan = str(payload.get("subscription_plan") or "free").strip().lower()
+        return {
+            "authenticated": True,
+            "user_id": user_id,
+            "email": raw_id if "@" in raw_id else f"{user_id}@novashop.demo",
+            "display_name": user_id.replace("_", " ").title(),
+            "user_type": user_type,
+            "subscription_plan": subscription_plan,
+        }
+
+    @app.post("/api/auth/logout")
+    async def shopper_logout() -> dict[str, bool]:
+        return {"authenticated": False}
 
     return app
 

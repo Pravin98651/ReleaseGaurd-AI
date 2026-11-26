@@ -7,6 +7,8 @@ import {
   ExternalLink,
   Flag,
   Layers,
+  LogIn,
+  LogOut,
   Minus,
   Plus,
   ShoppingBag,
@@ -37,6 +39,7 @@ import type {
 } from "@/lib/types";
 import { CheckoutV1Form } from "./CheckoutV1Form";
 import { CheckoutV2Express } from "./CheckoutV2Express";
+import { ShopperLoginModal, type ShopperSession } from "./ShopperLoginModal";
 import { SimulatorBar } from "./SimulatorBar";
 import { TelemetryInspector } from "./TelemetryInspector";
 
@@ -96,6 +99,8 @@ export function NovaShopStorefront({ initialConfig }: NovaShopStorefrontProps) {
   const [searchResults, setSearchResults] = useState<NovaShopFeatureProduct[]>([]);
   const [recAlgo, setRecAlgo] = useState("control");
   const [recProducts, setRecProducts] = useState<NovaShopFeatureProduct[]>([]);
+  const [loginOpen, setLoginOpen] = useState(false);
+  const [shopperSession, setShopperSession] = useState<ShopperSession | null>(null);
 
   const refreshTelemetry = useCallback(async () => {
     try {
@@ -318,6 +323,35 @@ export function NovaShopStorefront({ initialConfig }: NovaShopStorefrontProps) {
                 {isFlagsmithConnected ? "Flagsmith Live" : "Fallback Default"}
               </span>
             </div>
+
+            {shopperSession ? (
+              <div className="inline-flex items-center gap-2 rounded-lg border border-indigo-500/35 bg-indigo-500/10 px-2.5 py-1.5 text-xs text-indigo-200">
+                <UserCheck className="h-3.5 w-3.5 text-indigo-300" />
+                <span className="font-medium">{shopperSession.display_name}</span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShopperSession(null);
+                    setUserType("consumer");
+                    setSubscriptionPlan("free");
+                  }}
+                  className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-slate-300 hover:text-white"
+                  title="Sign out of NovaShop"
+                >
+                  <LogOut className="h-3 w-3" />
+                  Sign Out
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setLoginOpen(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-3 py-1.5 text-xs font-medium text-indigo-200 hover:bg-indigo-500/25 transition"
+              >
+                <LogIn className="h-3.5 w-3.5" />
+                Sign In
+              </button>
+            )}
 
             <a
               href={`${initialConfig.releaseGuardUrl.replace(/\/+$/, "")}/experiments`}
@@ -723,6 +757,18 @@ export function NovaShopStorefront({ initialConfig }: NovaShopStorefrontProps) {
           onRefresh={() => void refreshTelemetry()}
         />
       </main>
+
+      <ShopperLoginModal
+        open={loginOpen}
+        demoApiUrl={initialConfig.demoApiUrl}
+        onClose={() => setLoginOpen(false)}
+        onLoggedIn={(sess) => {
+          setShopperSession(sess);
+          setUserType(sess.user_type);
+          setSubscriptionPlan(sess.subscription_plan);
+          void handleSwitchUser(sess.user_id);
+        }}
+      />
     </div>
   );
 }

@@ -539,3 +539,30 @@ def test_simulator_scenarios_and_deterministic_replay() -> None:
             == b_data["sample_events"][0]["event_id"]
         )
 
+
+def test_shopper_auth_login_and_logout() -> None:
+    app = create_app()
+    with TestClient(app) as client:
+        bad = client.post("/api/auth/login", json={"email_or_id": "", "password": "123"})
+        assert bad.status_code == 422
+
+        ok = client.post(
+            "/api/auth/login",
+            json={
+                "email_or_id": "alex@novashop.demo",
+                "password": "novashop123",
+                "user_type": "internal",
+                "subscription_plan": "pro",
+            },
+        )
+        assert ok.status_code == 200
+        body = ok.json()
+        assert body["authenticated"] is True
+        assert body["user_id"] == "alex"
+        assert body["user_type"] == "internal"
+        assert body["subscription_plan"] == "pro"
+
+        out = client.post("/api/auth/logout")
+        assert out.status_code == 200
+        assert out.json()["authenticated"] is False
+
