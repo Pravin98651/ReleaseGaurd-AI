@@ -52,7 +52,7 @@ Shipping production changes directly exposes engineering teams to silent checkou
 3. **Deterministic Mathematics Outside the LLM**: Bayesian Beta-Binomial posteriors (`50,000` Monte Carlo draws), 95% credible intervals, expected loss, guardrail breach thresholds, DORA metrics, 7-dimension risk scores, and Flag Health scores are calculated strictly in Python (`backend/app/analytics/` and `backend/app/services/`).
 4. **Never Auto-Merge & Never Silently Mutate Production**: `pr_agent` can only open **Draft PRs (`draft: true`)**; production flag toggles, rollouts, rollbacks, archives, and experiment winner promotions **always** enforce `PolicyCategory.C` single-use human approval.
 5. **Pre-Execution Drift Check + Post-Mutation Readback**: Before executing any approved mutation, `approval_executor.py` verifies that live GitHub/Flagsmith state matches the captured `expected_precondition` (aborting on drift with `409`) and calls `verify_live_state()` immediately afterward.
-6. **Zero-Config Local & Container Portability**: Runs on PostgreSQL 16 (`asyncpg`) via Docker Compose or standalone on SQLite (`USE_SQLITE_FALLBACK=true`) with identical Alembic migrations (`0001`–`0011`) and LangGraph checkpointing.
+6. **Zero-Config Local & Container Portability**: Runs on PostgreSQL 16 (`asyncpg`) via Docker Compose or standalone on SQLite (`USE_SQLITE_FALLBACK=true`) with identical Alembic migrations (`0001`–`0012`) and LangGraph checkpointing.
 
 ---
 
@@ -67,11 +67,11 @@ flowchart LR
 
     subgraph ControlPlane["ReleaseGuard AI Stack"]
         FE["Control Plane UI — Next.js 16, Port 3000, 29 Routes, Dark and Light Theme"]
-        BE["Control Plane API — FastAPI, Port 8000, 25 v1 Routers, SSEBus"]
+        BE["Control Plane API — FastAPI, Port 8000, 26 v1 Routers, SSEBus"]
         AI["LangGraph StateGraph — pr_agent, flag_agent, experiment_agent"]
         ENG["Deterministic Engines — PolicyEngine, Risk, Progressive, Bayesian"]
         SCH["Persistent Scheduler — Atomic Lease Worker"]
-        DB["PostgreSQL 16 — Port 5432, 11 Alembic Migrations, SQLite Fallback"]
+        DB["PostgreSQL 16 — Port 5432, 12 Alembic Migrations, SQLite Fallback"]
     end
 
     subgraph DemoApp["NovaShop Storefront — demo-app"]
@@ -111,8 +111,8 @@ flowchart LR
 
 | Service | Host Port | Tech Stack | Primary Responsibility |
 | :--- | :---: | :--- | :--- |
-| **`postgres`** | `5432` | PostgreSQL 16 Alpine | Primary relational datastore, Alembic schema (`0001`–`0011`), LangGraph state checkpoints |
-| **`backend`** | `8000` | Python 3.14, FastAPI, Uvicorn | REST API (`25` v1 routers), SSE stream, LangGraph supervisor, PolicyEngine, Analytics, Scheduler |
+| **`postgres`** | `5432` | PostgreSQL 16 Alpine | Primary relational datastore, Alembic schema (`0001`–`0012`), LangGraph state checkpoints |
+| **`backend`** | `8000` | Python 3.14, FastAPI, Uvicorn | REST API (`26` v1 routers), SSE stream, LangGraph supervisor, PolicyEngine, Analytics, Scheduler |
 | **`frontend`** | `3000` | Next.js 16, React 19, Recharts | 29-route Governance Control Plane with `/flagsmith` Command Center & Dark/Light theme |
 | **`demo-backend`** | `8001` | Python 3.14, FastAPI, `flagsmith` | Multi-variant NovaShop storefront API, Flagsmith SDK exposure/conversion tracker, telemetry emitter |
 | **`demo-frontend`** | `3001` | Next.js 16, `@flagsmith/flagsmith` | Live NovaShop shopper checkout v1/v2 UI, recommendation/search variants, synthetic cohort simulator |
@@ -377,6 +377,7 @@ erDiagram
 | `0009_release_intelligence` | `release_outcomes`, `repository_intelligence_profiles`, `release_failure_patterns`, `release_insights`, `policy_recommendations`, `intelligence_analysis_runs` |
 | `0010_dx_integration` | `github_installations`, `github_webhook_events`, `github_check_runs`, `pull_request_analysis_comments`, `notification_deliveries`, `release_readiness_reports`, `shareable_reports`, `share_link_access_logs` |
 | `0011_multi_repo_intelligence` | `organizations`, `organization_repositories`, `repository_dependencies`, `cross_repo_impact_assessments`, `coordinated_release_plans`, `repository_health_snapshots`, `organization_release_policies` |
+| `0012_productivity_benchmarks` | `benchmark_runs`, `benchmark_stages` for reproducible developer productivity benchmarking & impact measurement |
 
 ---
 
@@ -394,7 +395,7 @@ erDiagram
 ### Backend API Routers (`/api/v1/*` + System Probes)
 
 Mounted via [backend/app/api/v1/__init__.py](backend/app/api/v1/__init__.py):
-`auth`, `dashboard`, `metrics`, `settings`, `integrations`, `repositories`, `pull-requests`, `code-changes`, `agent`, `agent-executions`, `feature-flags`, `flag-health`, `flagsmith` (`/command-center`, `/catalog`, `/catalog/provision`, `/identities/explain`, `/targeting/apply`, `/experiments/{exp_id}/run-test-harness`), `releases`, `rollouts`, `intelligence`, `dx` (GitHub App/Webhooks/Check Runs, Slack/Discord, Shareable Reports), `organization`, `risk-assessments` + `risk-engine`, `experiments` (`/plan`, `/activate`, `/stop`, `/analysis`, `/recommendation`, `/refresh-flagsmith-results`, `/promote-winner`), `events` (`/ingest`, `/stream`), `approvals`, `audit`, `schedules`, `notifications`, `system`, plus root probes `/health`, `/health/live`, and `/health/ready`.
+`auth`, `dashboard`, `metrics`, `benchmarks` (`/summary`, `/baselines`, `/runs`, `/runs/{benchmark_id}`, `/run`), `settings`, `integrations`, `repositories`, `pull-requests`, `code-changes`, `agent`, `agent-executions`, `feature-flags`, `flag-health`, `flagsmith` (`/command-center`, `/catalog`, `/catalog/provision`, `/identities/explain`, `/targeting/apply`, `/experiments/{exp_id}/run-test-harness`), `releases`, `rollouts`, `intelligence`, `dx` (GitHub App/Webhooks/Check Runs, Slack/Discord, Shareable Reports), `organization`, `risk-assessments` + `risk-engine`, `experiments` (`/plan`, `/activate`, `/stop`, `/analysis`, `/recommendation`, `/refresh-flagsmith-results`, `/promote-winner`), `events` (`/ingest`, `/stream`), `approvals`, `audit`, `schedules`, `notifications`, `system`, plus root probes `/health`, `/health/live`, and `/health/ready`.
 
 ---
 
@@ -407,7 +408,7 @@ NovaShop provides a live e-commerce target wired to Flagsmith Python SDK (`flags
 - **`GET /api/search`**: Executes `control` (substring), `ranked_v2` (weighted multi-field), or `semantic_v2` (intent/synonym expansion), gated instantaneously by `enable_new_search_backend`.
 - **`POST /api/checkout`**: Executes multi-step v1, 2-step `simplified_checkout`, or 1-page `one_page_checkout` with promo-bug failure toggle (`PROMO-BUG`) and `enable_payment_v2` kill switch, emitting Flagsmith `track_event` + ReleaseGuard `/api/v1/events/ingest`.
 - **`POST /api/events/track`**: Records recommendation clicks, search clicks, and cart additions into both Flagsmith and ReleaseGuard telemetry.
-- **`POST /api/simulate`**: Runs explicitly labelled deterministic traffic profiles (`healthy_v2`, `buggy_v2`, `neutral`) using live Flagsmith SDK assignments.
+- **`POST /api/simulate`**: Runs explicitly labelled deterministic synthetic traffic profiles (`healthy_v2`, `buggy_v2`, `neutral`, `healthy_control`, `winning_variant`, `underperforming_variant`, `guardrail_breach`, `insufficient_sample`) using live Flagsmith SDK assignments, reproducible seeds, and `start_index` resumption.
 
 ---
 
@@ -420,7 +421,7 @@ ReleaseGuard AI/
 ├── LICENSE                               # MIT License
 ├── README.md                             # Project documentation (this file)
 ├── backend/
-│   ├── alembic/                          # 11 portable PostgreSQL & SQLite migrations
+│   ├── alembic/                          # 12 portable PostgreSQL & SQLite migrations
 │   ├── app/
 │   │   ├── main.py                       # FastAPI factory, lifespan bootstrap, stale recovery
 │   │   ├── core/                         # Config, async DB engine, Fernet security, logging
@@ -429,19 +430,21 @@ ReleaseGuard AI/
 │   │   ├── integrations/                 # github_client.py, flagsmith_client.py (v1/v2 + native experiments)
 │   │   ├── agents/                       # LangGraph StateGraph supervisor, specialists, tools, approval_executor
 │   │   ├── analytics/                    # Pure-Python Bayesian, recommendations, flag health, incidents
-│   │   ├── services/                     # PolicyEngine, FlagsmithGovernanceService, ReleaseOrchestrator, Scheduler,
-│   │   │                                 # RiskEngine, ProgressiveDelivery, Intelligence, DX, Organization, SSEBus
-│   │   └── api/v1/                       # 25 REST/SSE FastAPI v1 sub-routers
-│   └── tests/                            # 27 automated pytest test modules (140 tests)
+│   │   ├── services/                     # PolicyEngine, FlagsmithGovernanceService, BenchmarkService,
+│   │   │                                 # ReleaseOrchestrator, Scheduler, RiskEngine, ProgressiveDelivery,
+│   │   │                                 # Intelligence, DX, Organization, SSEBus
+│   │   └── api/v1/                       # 26 REST/SSE FastAPI v1 sub-routers
+│   ├── scripts/                          # Repeatable CLI benchmark runner (run_benchmark.py)
+│   └── tests/                            # 29 automated pytest test modules (161 tests)
 ├── frontend/
 │   ├── app/                              # 29 Next.js App Router pages + Dark/Light globals.css
-│   ├── components/                       # AppShell, AuthGate, NotificationBell, Charts, Steppers, DiffViewer
+│   ├── components/                       # AppShell, DemoPathBar, AuthGate, NotificationBell, Charts, Steppers
 │   ├── lib/                              # Typed API client (30s AbortController timeout), SSE client, formatters
-│   └── __tests__/                        # 9 Vitest suites (24 tests)
+│   └── __tests__/                        # 10 Vitest suites (29 tests)
 ├── demo-app/
 │   ├── backend/                          # NovaShop FastAPI (port 8001) + Flagsmith Python SDK + features/checkout
 │   ├── frontend/                         # NovaShop Next.js (port 3001) + @flagsmith/flagsmith JS SDK
-│   └── tests/                            # Demo-app pytest suite (13 tests)
+│   └── tests/                            # Demo-app pytest suite (15 tests)
 └── docs/
     ├── flagsmith/                        # 10 Phase 8 audit, catalog, experiment, harness & compliance reports
     ├── reliability/                      # 10 reliability, edge-case, load & security reports
@@ -521,32 +524,33 @@ cd demo-app\frontend && npm install && npm run dev
 ### Observed Post-Edit Verification Results
 
 ```powershell
-# Backend Full Test Suite (Docker) -> 140 passed, 20 warnings (0 failed/skipped)
-docker run --rm -v "${PWD}/backend:/app" releaseguardai-backend python -m pytest -q
+# Backend Full Test Suite -> 161 passed, 0 failed/skipped
+cd backend && .\.venv\Scripts\pytest.exe -q
 
-# Targeted Flagsmith Client, Automated Flag Framework & Reliability Regression -> 38 passed
-docker run --rm -v "${PWD}/backend:/app" releaseguardai-backend python -m pytest -q tests/test_flagsmith_client.py tests/test_flagsmith_framework.py tests/test_reliability_edge_cases.py
+# Demo-App Suite -> 15 passed, 0 failed/skipped
+cd demo-app && ..\backend\.venv\Scripts\pytest.exe -q tests
 
-# Demo-App Suite (Docker) -> 13 passed
-docker run --rm -e PYTHONPATH=/app/backend -v "${PWD}/demo-app:/app" releaseguardai-demo-backend python -m pytest -q /app/tests
-
-# ReleaseGuard Frontend Typecheck, Lint & Vitest -> 9 files, 24 tests passed
+# ReleaseGuard Frontend Typecheck, Lint & Vitest -> 10 files, 29 tests passed
 cd frontend && npx tsc --noEmit && npm run lint && npx vitest run
 
 # Demo-App Frontend Typecheck & Lint -> Exit 0 (0 errors)
 cd demo-app/frontend && npx tsc --noEmit && npm run lint
 
+# Live Benchmark B (Development only, 3 trials with cleanup)
+python backend/scripts/run_benchmark.py --workflow flag_setup --environment development --require-live --trials 3
+
 # Host CLI Live Evaluation against Project #56055 Development -> Exit 0 (10/10 catalog flags)
 npx --yes @flagsmith/cli evaluate -e <FLAGSMITH_DEV_ENV_KEY> --sdk-api-url https://edge.api.flagsmith.com --json --no-input
 ```
 
-### 5-Minute Live Demo Walkthrough
+### 6-Screen Guided 5-Minute Demo Path
 
-1. **Integrations & Architecture (`/settings`)**: Verify masked GitHub + Flagsmith tokens, v2 feature versioning detection across `Development`/`Staging`/`Production`, and `flagsmith_native` mode.
-2. **Flagsmith Hub (`/flagsmith`)**: Inspect the `10` governed catalog flags, `3` targeting segments, live Edge **Identity Variation Explainer** (`shopper_42`), and `4` running native experiments (`#503`–`#506`).
-3. **AI Agent & Policy Gate (`/agent` -> `/approvals`)**: Prompt the LangGraph supervisor to propose a rollout or winner promotion — watch it pause at `interrupt()` with a `PolicyCategory.C` SHA-256 `action_hash`, then approve once in `/approvals`.
-4. **NovaShop Storefront (`http://localhost:3001`)**: Test checkout v1/v2, search variants, AI recommendations, and operational kill switches while streaming real SDK events to `/events/ingest`.
-5. **Bayesian Guardrails & Audit Logs (`/experiments` -> `/audit-logs`)**: Inspect Beta-Binomial credible intervals, sample adequacy guards, guardrail breach recommendations (`Recommend Rollback`), and full compliance export.
+1. **Dashboard (`/dashboard`)**: Central **Start an AI-powered release** workspace (repo, PR, NL objective) + clearly labelled NovaShop **Demo Mode** (`development` only, synthetic data badged).
+2. **AI Command Center (`/command-center`)**: Inspect the original user instruction, supervisor routing, specialist selection, proposed tool calls, PolicyEngine decisions, execution results, and approval interrupts (`Hidden CoT Redacted`).
+3. **GitHub PR Analysis (`/pull-requests`)**: Review 10-category confirmed vs. potential vs. unknown findings, 7-dimension risk breakdown, Flagsmith opportunity dedup, validated Flagsmith patch (`sha_ok`, `binary_ok`), and Draft PR status.
+4. **Flagsmith Experimentation (`/flagsmith` & `/experiments`)**: Inspect live Project `#56055` catalog flags, targeting segments, unique participants vs. raw exposures vs. conversions, Bayesian posteriors, readiness gate, and guardrail checks.
+5. **Approval & Progressive Delivery (`/approvals` & `/progressive-delivery`)**: Approve gated `Category C` actions and observe progressive rollout stages (`1% -> 5% -> 10% -> 25% -> 50% -> 100%`).
+6. **Final Release Report (`/releases/[id]`)**: Inspect the 9-stage Visual Release Lifecycle and structured Final Release Report separating **Verified Facts**, **Observations**, **Simulations**, and **AI Inferences** (plus **Productivity & Benchmarks** on `/metrics`).
 
 ---
 
