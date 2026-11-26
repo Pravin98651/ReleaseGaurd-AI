@@ -320,30 +320,50 @@ export default function DashboardPage() {
         end_date: range === "custom" && endDate ? endDate : undefined,
         environment: environment !== "all" ? environment : undefined,
       };
-      const [h, ov, appRes, repoRes] = await Promise.all([
+      const [healthRes, overviewRes, approvalsRes, reposRes] = await Promise.allSettled([
         getSystemHealth(),
         getDashboardOverview(filters),
-        listApprovals({ status: "pending", limit: 5 }).catch(() => ({
-          items: [],
-          total: 0,
-          limit: 5,
-          offset: 0,
-        })),
-        listRepositories({ limit: 50 }).catch(() => ({
-          items: [],
-          total: 0,
-          limit: 50,
-          offset: 0,
-        })),
+        listApprovals({ status: "pending", limit: 5 }),
+        listRepositories({ limit: 50 }),
       ]);
-      setHealth(h);
-      setOverview(ov);
-      setPendingApprovals(appRes.items);
-      setRepos(repoRes.items);
-      setSelectedRepoId((prev) => {
-        if (prev && repoRes.items.some((r) => r.id === prev)) return prev;
-        return repoRes.items[0]?.id ?? "";
-      });
+
+      const fetchErrors: string[] = [];
+
+      if (healthRes.status === "fulfilled") {
+        setHealth(healthRes.value);
+      } else {
+        fetchErrors.push(`System health: ${getErrorMessage(healthRes.reason)}`);
+      }
+
+      if (overviewRes.status === "fulfilled") {
+        setOverview(overviewRes.value);
+      } else {
+        fetchErrors.push(`Dashboard overview: ${getErrorMessage(overviewRes.reason)}`);
+      }
+
+      if (approvalsRes.status === "fulfilled") {
+        setPendingApprovals(approvalsRes.value.items);
+      } else {
+        setPendingApprovals([]);
+        fetchErrors.push(`Pending approvals: ${getErrorMessage(approvalsRes.reason)}`);
+      }
+
+      if (reposRes.status === "fulfilled") {
+        const items = reposRes.value.items;
+        setRepos(items);
+        setSelectedRepoId((prev) => {
+          if (prev && items.some((r) => r.id === prev)) return prev;
+          return items[0]?.id ?? "";
+        });
+      } else {
+        setRepos([]);
+        setSelectedRepoId("");
+        fetchErrors.push(`Repositories: ${getErrorMessage(reposRes.reason)}`);
+      }
+
+      if (fetchErrors.length > 0) {
+        setError(fetchErrors.join(" · "));
+      }
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -391,10 +411,11 @@ export default function DashboardPage() {
           const openPr = res.items.find((p) => p.state === "open") ?? res.items[0];
           setSelectedPrId(openPr?.id ?? "");
         })
-        .catch(() => {
+        .catch((err) => {
           if (!cancelled) {
             setPullRequests([]);
             setSelectedPrId("");
+            setWorkspaceError(`Failed to load pull requests: ${getErrorMessage(err)}`);
           }
         })
         .finally(() => {

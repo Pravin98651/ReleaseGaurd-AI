@@ -1087,7 +1087,7 @@ function PullRequestsInner() {
                         <p className="text-slate-300">{flagAgentRec.rationale}</p>
                       </div>
                       <Link
-                        href="/flags"
+                        href="/flagsmith"
                         className="inline-flex items-center gap-1 rounded-lg border border-cyan-500/40 bg-cyan-500/15 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-500/25"
                       >
                         Open Flag Manager <ExternalLink className="h-3 w-3" />

@@ -89,18 +89,37 @@ export default function ProgressiveDeliveryPage() {
   useEffect(() => {
     if (!showCreate) return;
     let active = true;
-    Promise.all([
-      listFeatureFlags({ limit: 50 }).catch(() => ({ items: [] })),
-      listReleases({ limit: 50 }).catch(() => ({ items: [] })),
-      listExperiments().catch(() => ({ items: [] })),
+    Promise.allSettled([
+      listFeatureFlags({ limit: 50 }),
+      listReleases({ limit: 50 }),
+      listExperiments(),
     ]).then(([fRes, rRes, eRes]) => {
       if (!active) return;
-      const flagItems = Array.isArray(fRes.items) ? fRes.items : [];
-      setFlags(flagItems);
-      setReleases(Array.isArray(rRes.items) ? rRes.items : []);
-      setExperiments(Array.isArray(eRes.items) ? eRes.items : []);
-      if (!selectedFlagId && flagItems.length > 0) {
-        setSelectedFlagId(flagItems[0].id);
+      const loadErrors: string[] = [];
+      if (fRes.status === "fulfilled") {
+        const flagItems = Array.isArray(fRes.value.items) ? fRes.value.items : [];
+        setFlags(flagItems);
+        if (!selectedFlagId && flagItems.length > 0) {
+          setSelectedFlagId(flagItems[0].id);
+        }
+      } else {
+        setFlags([]);
+        loadErrors.push(`Flags: ${getErrorMessage(fRes.reason)}`);
+      }
+      if (rRes.status === "fulfilled") {
+        setReleases(Array.isArray(rRes.value.items) ? rRes.value.items : []);
+      } else {
+        setReleases([]);
+        loadErrors.push(`Releases: ${getErrorMessage(rRes.reason)}`);
+      }
+      if (eRes.status === "fulfilled") {
+        setExperiments(Array.isArray(eRes.value.items) ? eRes.value.items : []);
+      } else {
+        setExperiments([]);
+        loadErrors.push(`Experiments: ${getErrorMessage(eRes.reason)}`);
+      }
+      if (loadErrors.length > 0) {
+        setError(`Failed to load rollout options — ${loadErrors.join("; ")}`);
       }
     });
     return () => {

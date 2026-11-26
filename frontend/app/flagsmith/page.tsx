@@ -335,9 +335,31 @@ export default function FlagsmithHubPage() {
         title="Flagsmith Hub"
         description="Connected Flagsmith project, environment rollout state, governed flag catalog with code paths & safe fallbacks, identity targeting, and active experiments."
         badge={
-          <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-300">
-            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            {data?.project_id ? `Live Project #${data.project_id}` : "Project Not Connected"}
+          <span
+            className={cn(
+              "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 text-[11px] font-medium",
+              data?.project_id
+                ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-300"
+                : loading && !data
+                  ? "border-slate-700 bg-slate-800/80 text-slate-400"
+                  : "border-amber-500/35 bg-amber-500/10 text-amber-300"
+            )}
+          >
+            <span
+              className={cn(
+                "h-1.5 w-1.5 rounded-full",
+                data?.project_id
+                  ? "bg-emerald-400"
+                  : loading && !data
+                    ? "bg-slate-500"
+                    : "bg-amber-400"
+              )}
+            />
+            {data?.project_id
+              ? `Live Project #${data.project_id}`
+              : loading && !data
+                ? "Checking Flagsmith..."
+                : "Project Not Connected"}
           </span>
         }
         actions={
@@ -456,8 +478,21 @@ export default function FlagsmithHubPage() {
                     <strong className="font-mono text-slate-100">{enabledCount}</strong> enabled /{" "}
                     <span className="font-mono">{liveCount}</span> synced
                   </span>
-                  <span className="text-[11px] text-emerald-300">
-                    {data?.project_id ? "Connected" : "Disconnected"}
+                  <span
+                    className={cn(
+                      "text-[11px] font-medium",
+                      data?.project_id
+                        ? "text-emerald-300"
+                        : loading && !data
+                          ? "text-slate-400"
+                          : "text-amber-300"
+                    )}
+                  >
+                    {data?.project_id
+                      ? "Connected"
+                      : loading && !data
+                        ? "Unknown"
+                        : "Disconnected"}
                   </span>
                 </div>
               </div>

@@ -79,25 +79,41 @@ function ExperimentsInner() {
   const [loading, setLoading] = useState(true);
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [staleWarning, setStaleWarning] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [queuedApproval, setQueuedApproval] = useState<Approval | null>(null);
 
-  const loadEvaluation = useCallback(async (exp: Experiment) => {
-    setSelectedExp(exp);
-    setAnalysis(exp.latest_bayesian_result ?? null);
-    setRecommendation(null);
-    try {
-      const [ana, rec] = await Promise.all([
-        getExperimentAnalysis(exp.id),
-        getExperimentRecommendation(exp.id),
-      ]);
-      setAnalysis(ana);
-      setRecommendation(rec);
-    } catch (err) {
-      // Surface real error if analysis fails rather than fabricating numbers
-      setError(getErrorMessage(err));
-    }
-  }, []);
+  const loadEvaluation = useCallback(
+    async (exp: Experiment) => {
+      const switchingExperiment = selectedExp?.id !== exp.id;
+      setSelectedExp(exp);
+      if (switchingExperiment) {
+        setAnalysis(exp.latest_bayesian_result ?? null);
+        setRecommendation(null);
+        setStaleWarning(null);
+      }
+      try {
+        const [ana, rec] = await Promise.all([
+          getExperimentAnalysis(exp.id),
+          getExperimentRecommendation(exp.id),
+        ]);
+        setAnalysis(ana);
+        setRecommendation(rec);
+        setStaleWarning(null);
+      } catch (err) {
+        // Surface real error if analysis fails rather than fabricating numbers,
+        // and preserve stale warning when previously loaded evaluation remains on screen.
+        const msg = getErrorMessage(err);
+        setError(msg);
+        if (!switchingExperiment) {
+          setStaleWarning(
+            `Refresh failed (${msg}). Showing previously loaded evaluation — results may be stale.`
+          );
+        }
+      }
+    },
+    [selectedExp?.id]
+  );
 
   const loadAll = useCallback(async () => {
     setLoading(true);
@@ -121,13 +137,21 @@ function ExperimentsInner() {
           expRes.items.find((e) => e.id === (selectedExp?.id || initialExpId)) ??
           expRes.items[0];
         await loadEvaluation(target);
+      } else {
+        setStaleWarning(null);
       }
     } catch (err) {
-      setError(getErrorMessage(err));
+      const msg = getErrorMessage(err);
+      setError(msg);
+      if (experiments.length > 0 || analysis) {
+        setStaleWarning(
+          `Refresh failed (${msg}). Showing previously loaded experiment data — results may be stale.`
+        );
+      }
     } finally {
       setLoading(false);
     }
-  }, [initialExpId, loadEvaluation, selectedExp?.id]);
+  }, [analysis, experiments.length, initialExpId, loadEvaluation, selectedExp?.id]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -285,6 +309,21 @@ function ExperimentsInner() {
       </div>
 
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
+      {staleWarning && (
+        <div
+          role="status"
+          className="flex items-center justify-between gap-3 rounded-xl border border-amber-500/40 bg-amber-500/10 px-4 py-2.5 text-xs text-amber-200"
+        >
+          <span>{staleWarning}</span>
+          <button
+            type="button"
+            onClick={() => setStaleWarning(null)}
+            className="shrink-0 rounded border border-amber-500/30 px-2 py-0.5 text-[11px] font-medium text-amber-200 hover:bg-amber-500/20"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
       <SuccessBanner message={notice} onDismiss={() => setNotice(null)} />
       <ApprovalQueuedBanner
         approval={queuedApproval}
@@ -770,7 +809,16 @@ function ExperimentsInner() {
                       label={`Treatment (${selectedExp.treatment_variation})`}
                       value={formatRate(analysis.treatment.mean_rate, 2)}
                       subtext={`${analysis.treatment.conversions}/${analysis.treatment.exposures} · 95% CrI [${formatRate(analysis.treatment.credible_interval_95[0], 1)}, ${formatRate(analysis.treatment.credible_interval_95[1], 1)}]`}
-                      tone="emerald"
+                      tone={
+                        analysis.experiment_outcome === "GUARDRAIL_BREACHED" ||
+                        Boolean(analysis.guardrails?.payment_failed?.breached) ||
+                        analysis.experiment_outcome === "CONTROL_WINS"
+                          ? "rose"
+                          : analysis.experiment_outcome === "VARIANT_WINS" &&
+                              analysis.sample_adequacy.is_adequate
+                            ? "emerald"
+                            : "default"
+                      }
                     />
                     <MetricCard
                       label="Expected Loss (Treatment)"

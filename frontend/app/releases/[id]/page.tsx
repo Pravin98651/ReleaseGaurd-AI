@@ -5,12 +5,14 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import {
   AlertTriangle,
+  Archive,
   ArrowLeft,
   ArrowRight,
   Bot,
   CheckCircle2,
   Clock,
   Download,
+  ExternalLink,
   FileCode2,
   FileText,
   FlaskConical,
@@ -22,6 +24,7 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sparkles,
+  Trash2,
   UserCheck,
   Wifi,
   WifiOff,
@@ -30,10 +33,12 @@ import {
 } from "lucide-react";
 import {
   API_BASE_URL,
+  ApiError,
   analyzeRelease,
   cancelRelease,
   createRiskAssessment,
   evaluateReleaseReadiness,
+  generateCleanupPr,
   getErrorMessage,
   getExperimentAnalysis,
   getExperimentRecommendation,
@@ -47,6 +52,7 @@ import {
   listRiskAssessments,
   listRollouts,
   pauseRelease,
+  requestFlagDelete,
   requestReleaseApproval,
   resumeRelease,
   retryRelease,
@@ -54,10 +60,13 @@ import {
 } from "@/lib/api";
 import type {
   AgentExecutionRecord,
+  Approval,
+  CodeChange,
   Experiment,
   ExperimentAnalysis,
   ExperimentRecommendation,
   FeatureFlag,
+  MutationOutcome,
   ProgressiveRolloutRecord,
   PullRequest,
   ReleaseDetail,
@@ -75,6 +84,7 @@ import {
   SuccessBanner,
 } from "@/components/ui/StatePrimitives";
 import { EnvironmentBadge, RiskLevelBadge, StatusBadge } from "@/components/StatusBadges";
+import { EvidenceBadge } from "@/components/EvidenceBadge";
 import { ApprovalActionCard } from "@/components/ApprovalActionCard";
 
 type CanonicalStageState =
@@ -652,17 +662,38 @@ export default function ReleaseDetailPage() {
   const [timelineFilter, setTimelineFilter] = useState("");
   const [sseConnected, setSseConnected] = useState(false);
   const [liveSseFeed, setLiveSseFeed] = useState<LiveSseItem[]>([]);
+  const [contextWarning, setContextWarning] = useState<string | null>(null);
+  const [cleanupBusy, setCleanupBusy] = useState<"pr" | "delete" | null>(null);
+  const [cleanupError, setCleanupError] = useState<string | null>(null);
+  const [cleanupBlockers, setCleanupBlockers] = useState<string[]>([]);
+  const [cleanupNotice, setCleanupNotice] = useState<string | null>(null);
+  const [cleanupPrOutcome, setCleanupPrOutcome] = useState<MutationOutcome<CodeChange> | null>(null);
+  const [deleteApproval, setDeleteApproval] = useState<Approval | null>(null);
+  const [deleteEnv, setDeleteEnv] = useState<string | null>(null);
+  const [deleteAction, setDeleteAction] = useState<"archive" | "delete">("archive");
 
   const loadLinkedContext = useCallback(async (relDetail: ReleaseDetail) => {
     const rel = relDetail.release;
+    const contextFailures: string[] = [];
+
     const [exeRes, riskRes, rolloutRes, repoRes] = await Promise.all([
-      listAgentExecutions({ release_id: rel.id, limit: 20 }).catch(() => ({ items: [] })),
-      listRiskAssessments({ release_id: rel.id, current_only: true, limit: 5 }).catch(() => ({
-        items: [],
-      })),
-      listRollouts({ release_id: rel.id, limit: 5 }).catch(() => ({ items: [] })),
+      listAgentExecutions({ release_id: rel.id, limit: 20 }).catch((err) => {
+        contextFailures.push(`Executions: ${getErrorMessage(err)}`);
+        return { items: [] };
+      }),
+      listRiskAssessments({ release_id: rel.id, current_only: true, limit: 5 }).catch((err) => {
+        contextFailures.push(`Risk assessments: ${getErrorMessage(err)}`);
+        return { items: [] };
+      }),
+      listRollouts({ release_id: rel.id, limit: 5 }).catch((err) => {
+        contextFailures.push(`Rollouts: ${getErrorMessage(err)}`);
+        return { items: [] };
+      }),
       rel.repository_id
-        ? listRepositories({ limit: 50 }).catch(() => ({ items: [] }))
+        ? listRepositories({ limit: 50 }).catch((err) => {
+            contextFailures.push(`Repositories: ${getErrorMessage(err)}`);
+            return { items: [] };
+          })
         : Promise.resolve({ items: [] }),
     ]);
 
@@ -673,40 +704,74 @@ export default function ReleaseDetailPage() {
       setRepository(repoRes.items.find((r) => r.id === rel.repository_id) ?? null);
     }
 
+    const extraPromises: Promise<void>[] = [];
+
     if (rel.pull_request_id) {
-      getPullRequest(rel.pull_request_id)
-        .then(setPullRequest)
-        .catch(() => setPullRequest(null));
+      extraPromises.push(
+        getPullRequest(rel.pull_request_id)
+          .then(setPullRequest)
+          .catch((err) => {
+            setPullRequest(null);
+            contextFailures.push(`Pull request: ${getErrorMessage(err)}`);
+          }),
+      );
     } else {
       setPullRequest(null);
     }
 
     if (rel.feature_flag_id) {
-      listFeatureFlags({ limit: 100 })
-        .then((res) => {
-          const found = res.items.find((f) => f.id === rel.feature_flag_id) ?? null;
-          setFeatureFlag(found);
-        })
-        .catch(() => setFeatureFlag(null));
+      extraPromises.push(
+        listFeatureFlags({ limit: 100 })
+          .then((res) => {
+            const found = res.items.find((f) => f.id === rel.feature_flag_id) ?? null;
+            setFeatureFlag(found);
+          })
+          .catch((err) => {
+            setFeatureFlag(null);
+            contextFailures.push(`Feature flag: ${getErrorMessage(err)}`);
+          }),
+      );
     } else {
       setFeatureFlag(null);
     }
 
     if (rel.experiment_id) {
-      Promise.all([
-        listExperiments().catch(() => ({ items: [] })),
-        getExperimentAnalysis(rel.experiment_id).catch(() => null),
-        getExperimentRecommendation(rel.experiment_id).catch(() => null),
-      ]).then(([expList, analysis, rec]) => {
-        setExperiment(expList.items.find((e) => e.id === rel.experiment_id) ?? null);
-        setExperimentAnalysis(analysis);
-        setExperimentRecommendation(rec);
-      });
+      extraPromises.push(
+        Promise.all([
+          listExperiments().catch((err) => {
+            contextFailures.push(`Experiments: ${getErrorMessage(err)}`);
+            return { items: [] };
+          }),
+          getExperimentAnalysis(rel.experiment_id).catch((err) => {
+            if (!(err instanceof ApiError && err.status === 404)) {
+              contextFailures.push(`Experiment analysis: ${getErrorMessage(err)}`);
+            }
+            return null;
+          }),
+          getExperimentRecommendation(rel.experiment_id).catch((err) => {
+            if (!(err instanceof ApiError && err.status === 404)) {
+              contextFailures.push(`Experiment recommendation: ${getErrorMessage(err)}`);
+            }
+            return null;
+          }),
+        ]).then(([expList, analysis, rec]) => {
+          setExperiment(expList.items.find((e) => e.id === rel.experiment_id) ?? null);
+          setExperimentAnalysis(analysis);
+          setExperimentRecommendation(rec);
+        }),
+      );
     } else {
       setExperiment(null);
       setExperimentAnalysis(null);
       setExperimentRecommendation(null);
     }
+
+    await Promise.all(extraPromises);
+    setContextWarning(
+      contextFailures.length > 0
+        ? `Some linked release context failed to load — ${contextFailures.join("; ")}`
+        : null,
+    );
   }, []);
 
   const loadDetail = useCallback(async () => {
@@ -796,6 +861,8 @@ export default function ReleaseDetailPage() {
     const execEs = new EventSource(`${API_BASE_URL}/api/v1/agent-executions/stream`, {
       withCredentials: true,
     });
+    execEs.onopen = () => setSseConnected(true);
+    execEs.onerror = () => setSseConnected(false);
     const onExecEvent = (eventName: string) => (evt: MessageEvent) => {
       try {
         const parsed = JSON.parse(evt.data);
@@ -823,6 +890,8 @@ export default function ReleaseDetailPage() {
     const taskEs = new EventSource(`${API_BASE_URL}/api/v1/agent/tasks/${activeTaskId}/stream`, {
       withCredentials: true,
     });
+    taskEs.onopen = () => setSseConnected(true);
+    taskEs.onerror = () => setSseConnected(false);
     const eventTypes = [
       "task.started",
       "agent.thinking",
@@ -862,6 +931,18 @@ export default function ReleaseDetailPage() {
       taskEs.close();
     };
   }, [activeTaskId, loadDetail, appendSseItem]);
+
+  const releaseStatus = detail?.release.status;
+  useEffect(() => {
+    if (sseConnected || !releaseId) return;
+    if (releaseStatus && ["completed", "rolled_back", "cancelled"].includes(releaseStatus)) {
+      return;
+    }
+    const timer = setInterval(() => {
+      void loadDetail();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [sseConnected, releaseId, releaseStatus, loadDetail]);
 
   const runAction = async (key: string, fn: () => Promise<unknown>, successMsg: string) => {
     setBusy(key);
@@ -1211,7 +1292,17 @@ export default function ReleaseDetailPage() {
         <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-3.5 space-y-2">
           <div className="flex items-center justify-between">
             <span className="font-semibold text-slate-100">8. Guardrails</span>
-            <EpistemicBadge kind="Verified Fact" />
+            <EvidenceBadge
+              evidenceClass={
+                experimentAnalysis?.guardrails?.payment_failed
+                  ? hasSyntheticSimulation
+                    ? "SIMULATED"
+                    : "OBSERVED"
+                  : checks.some((c) => c.is_blocking)
+                    ? "VERIFIED"
+                    : "UNKNOWN"
+              }
+            />
           </div>
           {experimentAnalysis?.guardrails?.payment_failed ? (
             <div className="space-y-1 text-slate-300">
@@ -1428,6 +1519,9 @@ export default function ReleaseDetailPage() {
       </div>
 
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
+      {contextWarning && (
+        <ErrorBanner error={contextWarning} onDismiss={() => setContextWarning(null)} />
+      )}
       <SuccessBanner message={notice} onDismiss={() => setNotice(null)} />
 
       {/* Live SSE Activity Feed (only when real SSE events arrive) */}
@@ -1924,6 +2018,290 @@ export default function ReleaseDetailPage() {
               </div>
             </div>
           </SectionCard>
+
+          {/* Screen 6: Release Completion & Flag Cleanup */}
+          <SectionCard
+            title="Release Completion & Flag Cleanup"
+            subtitle="Flag lifecycle status, cleanup Draft PR generation, and Category C Flagsmith archive/delete"
+            className="lg:col-span-2"
+            actions={
+              featureFlag ? (
+                <StatusBadge
+                  status={featureFlag.lifecycle_status ?? "active"}
+                  label={(featureFlag.lifecycle_status ?? "active").toUpperCase()}
+                />
+              ) : undefined
+            }
+          >
+            {!featureFlag ? (
+              <p className="text-xs text-slate-400">
+                No feature flag is linked to this release. Link a feature flag to track post-release cleanup and retirement.
+              </p>
+            ) : (
+              (() => {
+                const lifecycleStatus = (featureFlag.lifecycle_status ?? "active").toUpperCase();
+                const details = (featureFlag.lifecycle_details ?? {}) as Record<string, unknown>;
+                const detailBlockers = Array.isArray(details.blockers)
+                  ? details.blockers.map((b) => String(b))
+                  : [];
+                const prUrl =
+                  (typeof cleanupPrOutcome?.data?.draft_pr_url === "string" &&
+                    cleanupPrOutcome.data.draft_pr_url) ||
+                  (typeof details.cleanup_pr_url === "string" && details.cleanup_pr_url) ||
+                  null;
+                const prNumber =
+                  cleanupPrOutcome?.data?.draft_pr_number ??
+                  (typeof details.cleanup_pr_number === "number" ? details.cleanup_pr_number : null);
+                const approvalId =
+                  deleteApproval?.id ||
+                  (typeof details.cleanup_approval_id === "string" ? details.cleanup_approval_id : null);
+                const repoId = release.repository_id ?? featureFlag.repository_id ?? null;
+                const envOptions = Array.from(
+                  new Set([
+                    ...(Object.keys(featureFlag.env_states ?? {})),
+                    release.target_environment || "development",
+                    "development",
+                    "staging",
+                    "production",
+                  ]),
+                );
+
+                const handleGenerateCleanupPr = async () => {
+                  if (!repoId) {
+                    setCleanupError("No repository is linked to this release or feature flag.");
+                    return;
+                  }
+                  setCleanupBusy("pr");
+                  setCleanupError(null);
+                  setCleanupBlockers([]);
+                  setCleanupNotice(null);
+                  try {
+                    const outcome = await generateCleanupPr(featureFlag.id, {
+                      repository_id: repoId,
+                      keep_branch: "enabled",
+                      open_draft_pr: true,
+                    });
+                    setCleanupPrOutcome(outcome);
+                    if (outcome.execution_status === "approval_required" && outcome.approval) {
+                      setCleanupNotice(
+                        `Cleanup Draft PR requires approval (${outcome.approval.title}).`,
+                      );
+                    } else if (outcome.data?.draft_pr_url) {
+                      setCleanupNotice(
+                        `Cleanup Draft PR #${outcome.data.draft_pr_number ?? ""} created.`,
+                      );
+                    } else {
+                      setCleanupNotice("Cleanup patch generated and validated.");
+                    }
+                    await loadDetail();
+                  } catch (err) {
+                    setCleanupError(getErrorMessage(err));
+                  } finally {
+                    setCleanupBusy(null);
+                  }
+                };
+
+                const effectiveDeleteEnv =
+                  deleteEnv ?? (release.target_environment || "development");
+
+                const handleRequestDelete = async () => {
+                  setCleanupBusy("delete");
+                  setCleanupError(null);
+                  setCleanupBlockers([]);
+                  setCleanupNotice(null);
+                  try {
+                    const outcome = await requestFlagDelete(featureFlag.id, {
+                      action: deleteAction,
+                      environment_name: effectiveDeleteEnv,
+                      reason: `Post-release ${deleteAction} requested from Release ${release.release_key} (${effectiveDeleteEnv})`,
+                    });
+                    if (outcome.approval) {
+                      setDeleteApproval(outcome.approval);
+                    }
+                    setCleanupNotice(
+                      `Category C ${deleteAction} approval queued for '${featureFlag.key}' (${effectiveDeleteEnv}).`,
+                    );
+                    await loadDetail();
+                  } catch (err) {
+                    if (err instanceof ApiError && err.status === 409) {
+                      setCleanupError(`[${err.code}] ${err.message}`);
+                      const rawDetails = err.details ?? {};
+                      const blockersList: string[] = [];
+                      if (typeof rawDetails.remaining_code_references === "number" && rawDetails.remaining_code_references > 0) {
+                        blockersList.push(
+                          `${rawDetails.remaining_code_references} code reference(s) still remain in the repository.`,
+                        );
+                      }
+                      if (Array.isArray(rawDetails.blockers)) {
+                        rawDetails.blockers.forEach((b) => blockersList.push(String(b)));
+                      }
+                      if (blockersList.length === 0) {
+                        blockersList.push(err.message);
+                      }
+                      setCleanupBlockers(blockersList);
+                    } else {
+                      setCleanupError(getErrorMessage(err));
+                    }
+                  } finally {
+                    setCleanupBusy(null);
+                  }
+                };
+
+                return (
+                  <div className="space-y-3 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-2.5">
+                      <div className="space-y-0.5">
+                        <div className="text-slate-400">
+                          Feature Flag: <span className="font-mono text-indigo-300">{featureFlag.key}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-400">
+                          Lifecycle Status:{" "}
+                          <span className="font-mono font-semibold text-slate-200">{lifecycleStatus}</span>
+                          {featureFlag.code_references?.length > 0 && (
+                            <span className="ml-2 text-slate-500">
+                              · {featureFlag.code_references.length} code ref(s)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <StatusBadge status={featureFlag.lifecycle_status ?? "active"} label={lifecycleStatus} />
+                    </div>
+
+                    {lifecycleStatus === "PROMOTED" && detailBlockers.length > 0 && (
+                      <div className="rounded-lg border border-amber-500/35 bg-amber-500/10 p-3 text-amber-200">
+                        <div className="mb-1 flex items-center gap-1.5 font-semibold">
+                          <AlertTriangle className="h-3.5 w-3.5" />
+                          Cleanup Blockers ({detailBlockers.length})
+                        </div>
+                        <ul className="list-disc space-y-0.5 pl-4">
+                          {detailBlockers.map((blocker, idx) => (
+                            <li key={idx}>{blocker}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {cleanupError && (
+                      <ErrorBanner error={cleanupError} onDismiss={() => setCleanupError(null)} />
+                    )}
+                    {cleanupNotice && (
+                      <SuccessBanner message={cleanupNotice} onDismiss={() => setCleanupNotice(null)} />
+                    )}
+
+                    {cleanupBlockers.length > 0 && (
+                      <div className="rounded-lg border border-rose-500/35 bg-rose-500/10 p-3 text-rose-200">
+                        <div className="mb-1 flex items-center gap-1.5 font-semibold">
+                          <ShieldAlert className="h-3.5 w-3.5" />
+                          409 Precondition Blockers
+                        </div>
+                        <ul className="list-disc space-y-0.5 pl-4">
+                          {cleanupBlockers.map((blocker, idx) => (
+                            <li key={idx}>{blocker}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {/* Generate Cleanup Draft PR */}
+                      <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-3 space-y-2.5">
+                        <div className="font-semibold text-slate-100">1. Cleanup Draft PR (Category B)</div>
+                        <p className="text-[11px] text-slate-400">
+                          Generate a validated patch removing flag branches and open a GitHub Draft PR.
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            disabled={cleanupBusy !== null || !repoId || lifecycleStatus === "CLEANED_UP"}
+                            onClick={() => void handleGenerateCleanupPr()}
+                            className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-400 disabled:opacity-50"
+                          >
+                            <GitPullRequest className="h-3.5 w-3.5" />
+                            {cleanupBusy === "pr" ? "Generating..." : "Generate Cleanup Draft PR"}
+                          </button>
+                          {prUrl && (
+                            <a
+                              href={prUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 rounded-lg border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] font-medium text-emerald-200 hover:bg-emerald-500/20"
+                            >
+                              Draft PR {prNumber ? `#${prNumber}` : ""}
+                              <ExternalLink className="h-3 w-3" />
+                            </a>
+                          )}
+                        </div>
+                        {cleanupPrOutcome?.execution_status === "approval_required" && cleanupPrOutcome.approval && (
+                          <Link
+                            href="/approvals"
+                            className="inline-flex items-center gap-1 text-[11px] text-amber-300 hover:underline"
+                          >
+                            Review Category B Approval ({cleanupPrOutcome.approval.id.slice(0, 8)}…)
+                            <ArrowRight className="h-3 w-3" />
+                          </Link>
+                        )}
+                      </div>
+
+                      {/* Request Flag Archive/Delete */}
+                      <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-3 space-y-2.5">
+                        <div className="font-semibold text-slate-100">2. Flag Retirement (Category C)</div>
+                        <p className="text-[11px] text-slate-400">
+                          Queue a mandatory human approval to archive or delete the flag in Flagsmith once cleanup PR is merged.
+                        </p>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <select
+                            aria-label="Target environment for flag retirement"
+                            value={effectiveDeleteEnv}
+                            onChange={(e) => setDeleteEnv(e.target.value)}
+                            className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-[11px] text-slate-200"
+                          >
+                            {envOptions.map((env) => (
+                              <option key={env} value={env}>
+                                {env}
+                              </option>
+                            ))}
+                          </select>
+                          <select
+                            aria-label="Flag retirement action"
+                            value={deleteAction}
+                            onChange={(e) => setDeleteAction(e.target.value as "archive" | "delete")}
+                            className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-[11px] text-slate-200"
+                          >
+                            <option value="archive">Archive</option>
+                            <option value="delete">Delete</option>
+                          </select>
+                          <button
+                            type="button"
+                            disabled={cleanupBusy !== null || lifecycleStatus === "CLEANED_UP"}
+                            onClick={() => void handleRequestDelete()}
+                            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-1.5 text-xs font-semibold text-rose-200 hover:bg-rose-500/20 disabled:opacity-50"
+                          >
+                            {deleteAction === "delete" ? (
+                              <Trash2 className="h-3.5 w-3.5" />
+                            ) : (
+                              <Archive className="h-3.5 w-3.5" />
+                            )}
+                            {cleanupBusy === "delete"
+                              ? "Requesting..."
+                              : `Request Flag ${deleteAction === "delete" ? "Delete" : "Archive"}`}
+                          </button>
+                        </div>
+                        {approvalId && (
+                          <Link
+                            href="/approvals"
+                            className="inline-flex items-center gap-1 rounded-lg border border-amber-500/35 bg-amber-500/10 px-2.5 py-1 text-[11px] font-medium text-amber-200 hover:bg-amber-500/20"
+                          >
+                            Category C Approval Queued ({approvalId.slice(0, 8)}…) — Open Approvals
+                            <ArrowRight className="h-3 w-3" />
+                          </Link>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()
+            )}
+          </SectionCard>
         </div>
       )}
 
@@ -2002,21 +2380,29 @@ export default function ReleaseDetailPage() {
           }
         >
           <div className="space-y-2">
-            {filteredEvents.map((ev) => (
-              <div
-                key={ev.id}
-                className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-2 text-xs"
-              >
-                <div>
-                  <div className="font-semibold text-slate-100">{ev.title}</div>
-                  {ev.message && <div className="mt-0.5 text-slate-400">{ev.message}</div>}
+            {filteredEvents.length === 0 ? (
+              <p className="text-xs text-slate-400">
+                {events.length === 0
+                  ? "No lifecycle events recorded yet."
+                  : "No lifecycle events match your filter."}
+              </p>
+            ) : (
+              filteredEvents.map((ev) => (
+                <div
+                  key={ev.id}
+                  className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-2 text-xs"
+                >
+                  <div>
+                    <div className="font-semibold text-slate-100">{ev.title}</div>
+                    {ev.message && <div className="mt-0.5 text-slate-400">{ev.message}</div>}
+                  </div>
+                  <div className="text-right font-mono text-[10px] text-slate-500">
+                    <div>{ev.event_type}</div>
+                    <div>{formatTimestamp(ev.created_at)}</div>
+                  </div>
                 </div>
-                <div className="text-right font-mono text-[10px] text-slate-500">
-                  <div>{ev.event_type}</div>
-                  <div>{formatTimestamp(ev.created_at)}</div>
-                </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </SectionCard>
       )}

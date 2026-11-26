@@ -1135,7 +1135,7 @@ export async function generateCleanupPr(
 
 export async function requestFlagDelete(
   flagId: string,
-  body?: { action?: "archive" | "delete"; reason?: string }
+  body?: { action?: "archive" | "delete"; environment_name?: string; reason?: string }
 ): Promise<MutationOutcome<Record<string, unknown>>> {
   const { status, data } = await requestJson<unknown>(
     `/api/v1/flag-health/${flagId}/request-delete`,

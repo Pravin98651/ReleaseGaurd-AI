@@ -122,7 +122,7 @@ function HealthPill({
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
-  const [advancedOpen, setAdvancedOpen] = useState(true);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     if (typeof window !== "undefined") {
       return window.localStorage.getItem("rg_theme") === "light" ? "light" : "dark";

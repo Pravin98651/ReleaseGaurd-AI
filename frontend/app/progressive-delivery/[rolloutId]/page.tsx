@@ -50,6 +50,7 @@ export default function ProgressiveRolloutDetailPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [sseStatus, setSseStatus] = useState<"connecting" | "connected" | "error">("connecting");
   const [validationResult, setValidationResult] = useState<{
     valid: boolean;
     blockers: string[];
@@ -91,14 +92,35 @@ export default function ProgressiveRolloutDetailPage() {
 
   useEffect(() => {
     if (!rolloutId || typeof EventSource === "undefined") return;
-    const source = new EventSource(getRolloutStreamUrl(rolloutId));
+    const source = new EventSource(getRolloutStreamUrl(rolloutId), {
+      withCredentials: true,
+    });
+    source.onopen = () => {
+      setSseStatus("connected");
+    };
     source.onmessage = () => {
+      setSseStatus("connected");
       void loadDetail();
+    };
+    source.onerror = () => {
+      setSseStatus("error");
     };
     return () => {
       source.close();
     };
   }, [rolloutId, loadDetail]);
+
+  const rolloutStatus = detail?.rollout.status;
+  useEffect(() => {
+    if (sseStatus !== "error" || !rolloutId) return;
+    if (rolloutStatus && ["completed", "rolled_back", "cancelled", "failed"].includes(rolloutStatus)) {
+      return;
+    }
+    const timer = setInterval(() => {
+      void loadDetail();
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [sseStatus, rolloutId, rolloutStatus, loadDetail]);
 
   async function runAction(label: string, fn: () => Promise<unknown>, successMsg: string) {
     setBusy(label);
@@ -149,6 +171,21 @@ export default function ProgressiveRolloutDetailPage() {
         description={`Flag: ${rollout.feature_flag_key} | Primary metric: ${rollout.primary_metric_key}`}
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+                sseStatus === "connected"
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                  : sseStatus === "error"
+                    ? "border-amber-500/35 bg-amber-500/10 text-amber-300"
+                    : "border-slate-700 bg-slate-900 text-slate-400"
+              }`}
+            >
+              {sseStatus === "connected"
+                ? "Live SSE"
+                : sseStatus === "error"
+                  ? "SSE Disconnected (Polling)"
+                  : "Connecting SSE..."}
+            </span>
             <StatusBadge status={rollout.status} />
             <EnvironmentBadge environment={rollout.environment} />
             <span className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 font-mono text-xs text-slate-200">

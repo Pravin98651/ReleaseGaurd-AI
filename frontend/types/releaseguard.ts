@@ -435,6 +435,8 @@ export interface FeatureFlag {
   description?: string | null;
   flag_type: "STANDARD" | "MULTIVARIATE" | string;
   is_archived: boolean;
+  lifecycle_status?: string;
+  lifecycle_details?: Record<string, unknown>;
   env_states: Record<string, FlagEnvironmentState>;
   mv_options: MultivariateOption[];
   code_references: CodeReference[];

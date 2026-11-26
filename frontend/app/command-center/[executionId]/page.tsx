@@ -70,6 +70,7 @@ export default function ExecutionDetailPage() {
   >("overview");
   const [traceFilter, setTraceFilter] = useState("");
   const [refreshTick, setRefreshTick] = useState(0);
+  const [sseStatus, setSseStatus] = useState<"connecting" | "connected" | "error">("connecting");
 
   useEffect(() => {
     if (!executionId) return;
@@ -97,7 +98,12 @@ export default function ExecutionDetailPage() {
     const es = new EventSource(`${API_BASE_URL}/api/v1/agent-executions/${executionId}/stream`, {
       withCredentials: true,
     });
-    const onEvt = () => setRefreshTick((n) => n + 1);
+    const onEvt = () => {
+      setSseStatus("connected");
+      setRefreshTick((n) => n + 1);
+    };
+    es.onopen = () => setSseStatus("connected");
+    es.onerror = () => setSseStatus("error");
     es.addEventListener("execution.updated", onEvt);
     es.addEventListener("execution.decision", onEvt);
     return () => {
@@ -111,7 +117,12 @@ export default function ExecutionDetailPage() {
     const taskEs = new EventSource(`${API_BASE_URL}/api/v1/agent/tasks/${activeAgentTaskId}/stream`, {
       withCredentials: true,
     });
-    const onTaskEvt = () => setRefreshTick((n) => n + 1);
+    const onTaskEvt = () => {
+      setSseStatus("connected");
+      setRefreshTick((n) => n + 1);
+    };
+    taskEs.onopen = () => setSseStatus("connected");
+    taskEs.onerror = () => setSseStatus("error");
     const events = [
       "task.started",
       "agent.thinking",
@@ -129,6 +140,18 @@ export default function ExecutionDetailPage() {
       taskEs.close();
     };
   }, [activeAgentTaskId]);
+
+  const exeStatus = detail?.execution.status;
+  useEffect(() => {
+    if (sseStatus !== "error" || !executionId) return;
+    if (exeStatus && ["completed", "failed", "cancelled", "timed_out"].includes(exeStatus)) {
+      return;
+    }
+    const timer = setInterval(() => {
+      setRefreshTick((n) => n + 1);
+    }, 10000);
+    return () => clearInterval(timer);
+  }, [sseStatus, executionId, exeStatus]);
 
   const runControl = async (key: string, fn: () => Promise<unknown>, msg: string) => {
     setBusy(key);
@@ -235,6 +258,21 @@ export default function ExecutionDetailPage() {
         }
         actions={
           <div className="flex flex-wrap items-center gap-2">
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-medium ${
+                sseStatus === "connected"
+                  ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                  : sseStatus === "error"
+                    ? "border-amber-500/35 bg-amber-500/10 text-amber-300"
+                    : "border-slate-700 bg-slate-900 text-slate-400"
+              }`}
+            >
+              {sseStatus === "connected"
+                ? "Live SSE"
+                : sseStatus === "error"
+                  ? "SSE Disconnected (Polling)"
+                  : "Connecting SSE..."}
+            </span>
             {exe.release_id && (
               <Link
                 href={`/releases/${exe.release_id}`}
@@ -650,28 +688,36 @@ export default function ExecutionDetailPage() {
           }
         >
           <div className="space-y-2">
-            {filteredTraces.map((tr) => (
-              <div
-                key={tr.id}
-                className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-2 text-xs"
-              >
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono text-[10px] text-slate-500">
-                      #{tr.sequence_number}
-                    </span>
-                    <span className="font-semibold text-slate-100">{tr.message}</span>
+            {filteredTraces.length === 0 ? (
+              <p className="text-xs text-slate-400">
+                {traces.length === 0
+                  ? "No execution trace events recorded yet."
+                  : "No trace events match your filter."}
+              </p>
+            ) : (
+              filteredTraces.map((tr) => (
+                <div
+                  key={tr.id}
+                  className="flex flex-wrap items-start justify-between gap-2 rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-2 text-xs"
+                >
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-[10px] text-slate-500">
+                        #{tr.sequence_number}
+                      </span>
+                      <span className="font-semibold text-slate-100">{tr.message}</span>
+                    </div>
+                    <div className="mt-0.5 font-mono text-[10px] text-slate-500">
+                      {tr.event_type} · {tr.category}
+                    </div>
                   </div>
-                  <div className="mt-0.5 font-mono text-[10px] text-slate-500">
-                    {tr.event_type} · {tr.category}
-                  </div>
+                  <span className="inline-flex items-center gap-1 font-mono text-[10px] text-slate-400">
+                    <Clock className="h-3 w-3" />
+                    {formatTimestamp(tr.created_at)}
+                  </span>
                 </div>
-                <span className="inline-flex items-center gap-1 font-mono text-[10px] text-slate-400">
-                  <Clock className="h-3 w-3" />
-                  {formatTimestamp(tr.created_at)}
-                </span>
-              </div>
-            ))}
+              ))
+            )}
           </div>
         </SectionCard>
       )}
