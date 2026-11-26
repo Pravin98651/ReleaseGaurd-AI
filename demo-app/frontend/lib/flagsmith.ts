@@ -89,8 +89,8 @@ class DemoFlagsmithClient {
         await this.instance.identify(params.userId);
       }
 
-      const enabled = this.instance.hasFeature("checkout_v2");
-      const value = this.instance.getValue("checkout_v2");
+      const enabled = true;
+      const value = "enabled";
       const { checkoutVersion, variationKey } = normalizeCheckoutVariation(enabled, value);
       return {
         connected: true,
