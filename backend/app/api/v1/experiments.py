@@ -22,8 +22,12 @@ from app.agents.tools.experiment_tools import (
     handle_stop_or_conclude_experiment,
     load_experiment_events_for_experiment,
 )
-from app.analytics.bayesian import analyze_experiment_events
-from app.analytics.recommendations import evaluate_recommendation
+from app.analytics.bayesian import ExperimentOutcome, analyze_experiment_events
+from app.analytics.recommendations import (
+    evaluate_experiment_readiness,
+    evaluate_recommendation,
+    map_flagsmith_native_results,
+)
 from app.api.deps import (
     AuthenticatedOperator,
     DBSession,
@@ -440,12 +444,23 @@ async def get_experiment_recommendation(
         )
     await session.commit()
 
+    readiness = evaluate_experiment_readiness(
+        analysis=analysis,
+        experiment_status=exp.status.value,
+        analytics_mode=exp.analytics_mode.value,
+        flagsmith_experiment_id=exp.flagsmith_experiment_id,
+        started_at=exp.started_at,
+        latest_event_at=events[-1].occurred_at if events else None,
+        native_summary=(exp.latest_bayesian_result or {}).get("flagsmith_native_summary"),
+    )
     trigger_strings = [t.description for t in rec.triggers if t.met] or [
         t.description for t in rec.triggers
     ]
     resp = RecommendationResponse(
         experiment_id=exp.id,
         recommendation=ReleaseRecommendation(rec.recommendation.value),
+        experiment_outcome=analysis.experiment_outcome.value,
+        readiness=readiness.model_dump(mode="json"),
         triggers=trigger_strings,
         confidence_summary=rec.confidence_summary,
         preconditions=rec.preconditions,
@@ -483,10 +498,12 @@ async def refresh_flagsmith_experiment_results(
     results_resp = await client.get_experiment_results(
         exp.environment_key, exp.flagsmith_experiment_id
     )
+    native_summary = map_flagsmith_native_results(results_resp)
     return {
         "experiment_id": str(exp.id),
         "flagsmith_experiment_id": exp.flagsmith_experiment_id,
         "refresh": refresh_resp,
+        "flagsmith_native_summary": native_summary,
         **results_resp,
     }
 
@@ -513,6 +530,47 @@ async def promote_experiment_winner(
         else exp.treatment_variation
     )
     ctx = await build_tool_context(request.app, session, user_id=operator.id)
+    ws = await PolicyEngine.get_workspace_settings(session)
+    cfg = get_settings()
+    merged_thresholds = dict(ws.default_guardrails or {})
+    merged_thresholds.update(dict(exp.guardrail_thresholds or {}))
+    events = await load_experiment_events_for_experiment(ctx, exp)
+    analysis = analyze_experiment_events(
+        events,
+        experiment_id=str(exp.id),
+        analytics_mode=exp.analytics_mode.value,
+        control_variation=exp.control_variation,
+        treatment_variation=exp.treatment_variation,
+        primary_metric=exp.primary_metric,
+        variation_map=build_variation_map(exp),
+        mc_samples=cfg.BAYESIAN_MC_SAMPLES,
+        seed=cfg.BAYESIAN_MC_SEED,
+        thresholds=merged_thresholds,
+    )
+    readiness = evaluate_experiment_readiness(
+        analysis=analysis,
+        experiment_status=exp.status.value,
+        analytics_mode=exp.analytics_mode.value,
+        flagsmith_experiment_id=exp.flagsmith_experiment_id,
+        started_at=exp.started_at,
+        latest_event_at=events[-1].occurred_at if events else None,
+        native_summary=(exp.latest_bayesian_result or {}).get("flagsmith_native_summary"),
+    )
+    if winner != exp.control_variation:
+        if analysis.experiment_outcome == ExperimentOutcome.GUARDRAIL_BREACHED or analysis.guardrails.payment_failed.breached:
+            raise APIException(
+                409,
+                "GUARDRAIL_BREACHED",
+                "Cannot promote experimental variant while mandatory guardrails are breached.",
+                details={"outcome": analysis.experiment_outcome.value, "rationale": analysis.outcome_rationale},
+            )
+        if not readiness.is_ready_for_winner_decision:
+            raise APIException(
+                409,
+                "EXPERIMENT_NOT_READY",
+                "Experiment has not met readiness requirements for winner promotion.",
+                details={"blocking_reasons": readiness.blocking_reasons},
+            )
     action_payload = {
         "experiment_id": str(exp.id),
         "winning_variation": winner,

@@ -128,6 +128,12 @@ class BayesianAnalysisResponse(BaseModel):
     control: VariantPosteriorSchema
     treatment: VariantPosteriorSchema
     comparison: BayesianComparisonSchema
+    frequentist: dict[str, Any] | None = None
+    participant_metrics: dict[str, Any] | None = None
+    experiment_outcome: str | None = None
+    outcome_rationale: str | None = None
+    readiness: dict[str, Any] | None = None
+    flagsmith_native_summary: dict[str, Any] | None = None
     guardrails: dict[str, Any]
 
 
@@ -136,6 +142,8 @@ class RecommendationResponse(BaseModel):
 
     experiment_id: UUID
     recommendation: ReleaseRecommendation
+    experiment_outcome: str | None = None
+    readiness: dict[str, Any] | None = None
     triggers: list[str] = Field(default_factory=list)
     confidence_summary: str
     preconditions: list[str] = Field(default_factory=list)

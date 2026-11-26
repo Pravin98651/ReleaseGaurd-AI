@@ -444,9 +444,49 @@ export interface ExperimentAnalysis {
     checkout_abandoned?: {
       control_count: number;
       treatment_count: number;
+      control_rate?: number;
+      treatment_rate?: number;
     };
     [key: string]: unknown;
   };
+  frequentist?: {
+    z_statistic: number;
+    p_value: number;
+    significant_at_95: boolean;
+    note?: string;
+  } | null;
+  participant_metrics?: {
+    control_unique_participants: number;
+    treatment_unique_participants: number;
+    control_raw_exposures: number;
+    treatment_raw_exposures: number;
+    control_total_conversions: number;
+    treatment_total_conversions: number;
+    control_unique_conversions: number;
+    treatment_unique_conversions: number;
+    control_conversion_rate: number;
+    treatment_conversion_rate: number;
+    deduplicated_events: number;
+    total_events_processed: number;
+    unattributed_events: number;
+  } | null;
+  experiment_outcome?: string | null;
+  outcome_rationale?: string | null;
+  readiness?: {
+    is_ready_for_winner_decision: boolean;
+    checks: Array<{ key: string; label: string; passed: boolean; detail: string }>;
+    blocking_reasons: string[];
+  } | null;
+  flagsmith_native_summary?: {
+    available: boolean;
+    status_code?: number;
+    is_final?: boolean;
+    as_of?: string | null;
+    stale?: boolean;
+    metric_id?: number | null;
+    srm_p_value?: number | null;
+    note?: string;
+  } | null;
 }
 
 export interface RecommendationTrigger {

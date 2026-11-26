@@ -9,6 +9,7 @@ from typing import Annotated, Any
 
 from fastapi import APIRouter, Header, Query, Request
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import AuthenticatedOperator, DBSession
 from app.api.v1.errors import APIException
@@ -80,6 +81,9 @@ async def ingest_events(
         flag_id = flag_id_by_key.get(item.flag_key)
         resolved_exp_id = exp_lookup.get((flag_id, env_norm)) if flag_id else None
 
+        props = dict(item.properties or {})
+        props.setdefault("source", "ingest_api")
+
         ev = ExperimentEvent(
             event_id=item.event_id,
             experiment_id=resolved_exp_id,
@@ -90,11 +94,16 @@ async def ingest_events(
             user_identifier=item.user_identifier,
             session_key=item.session_key,
             numeric_value=item.numeric_value,
-            properties=dict(item.properties or {}),
+            properties=props,
             occurred_at=item.occurred_at,
         )
-        session.add(ev)
-        accepted += 1
+        try:
+            async with session.begin_nested():
+                session.add(ev)
+                await session.flush()
+            accepted += 1
+        except IntegrityError:
+            deduplicated += 1
 
     await session.commit()
     return EventIngestResponse(accepted=accepted, deduplicated=deduplicated)

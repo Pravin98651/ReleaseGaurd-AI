@@ -10,6 +10,7 @@ import math
 import random
 from collections.abc import Iterable, Mapping
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -140,6 +141,46 @@ class GuardrailsSummary(BaseModel):
     checkout_abandoned: AbandonmentGuardrail
 
 
+class ExperimentOutcome(StrEnum):
+    """Explicit Bayesian + guardrail experiment outcome states."""
+
+    INSUFFICIENT_DATA = "INSUFFICIENT_DATA"
+    NO_CLEAR_WINNER = "NO_CLEAR_WINNER"
+    CONTROL_WINS = "CONTROL_WINS"
+    VARIANT_WINS = "VARIANT_WINS"
+    GUARDRAIL_BREACHED = "GUARDRAIL_BREACHED"
+    INCONCLUSIVE = "INCONCLUSIVE"
+
+
+class FrequentistComparison(BaseModel):
+    """Complementary two-proportion z-test (distinct from Bayesian probability of superiority)."""
+
+    z_statistic: float
+    p_value: float
+    significant_at_95: bool
+    note: str = (
+        "Frequentist two-proportion z-test p-value is distinct from Bayesian P(Treatment > Control)."
+    )
+
+
+class ParticipantMetricsSummary(BaseModel):
+    """Explicit distinction between participants, exposures, total conversions, and unique conversions."""
+
+    control_unique_participants: int
+    treatment_unique_participants: int
+    control_raw_exposures: int
+    treatment_raw_exposures: int
+    control_total_conversions: int
+    treatment_total_conversions: int
+    control_unique_conversions: int
+    treatment_unique_conversions: int
+    control_conversion_rate: float
+    treatment_conversion_rate: float
+    deduplicated_events: int
+    total_events_processed: int
+    unattributed_events: int
+
+
 class BayesianAnalysisResult(BaseModel):
     """Complete Bayesian Beta-Binomial output matching docs/api.md Sec 2.7 /analysis."""
 
@@ -149,6 +190,10 @@ class BayesianAnalysisResult(BaseModel):
     control: VariantPosterior
     treatment: VariantPosterior
     comparison: ComparisonMetrics
+    frequentist: FrequentistComparison | None = None
+    participant_metrics: ParticipantMetricsSummary | None = None
+    experiment_outcome: ExperimentOutcome = ExperimentOutcome.INSUFFICIENT_DATA
+    outcome_rationale: str = ""
     guardrails: GuardrailsSummary
     thresholds: GuardrailThresholds
     mc_samples: int
@@ -166,6 +211,10 @@ class AggregatedExperimentCounts(BaseModel):
     treatment_errors: int
     control_abandoned: int
     treatment_abandoned: int
+    control_raw_exposures: int = 0
+    treatment_raw_exposures: int = 0
+    control_total_conversions: int = 0
+    treatment_total_conversions: int = 0
     total_events_processed: int
     deduplicated_events: int
     unattributed_events: int
@@ -190,6 +239,116 @@ def _quantile(sorted_values: list[float], q: float) -> float:
 def _ci95(sorted_values: list[float]) -> list[float]:
     """Return 95% equal-tailed credible interval [2.5th, 97.5th percentile]."""
     return [_quantile(sorted_values, 0.025), _quantile(sorted_values, 0.975)]
+
+
+def compute_frequentist_z_test(
+    *,
+    control_exposures: int,
+    control_conversions: int,
+    treatment_exposures: int,
+    treatment_conversions: int,
+) -> FrequentistComparison:
+    """Compute a two-proportion z-test p-value (complementary to Bayesian posteriors)."""
+    if control_exposures <= 0 or treatment_exposures <= 0:
+        return FrequentistComparison(z_statistic=0.0, p_value=1.0, significant_at_95=False)
+    p1 = control_conversions / control_exposures
+    p2 = treatment_conversions / treatment_exposures
+    p_pool = (control_conversions + treatment_conversions) / (
+        control_exposures + treatment_exposures
+    )
+    se = math.sqrt(
+        max(
+            0.0,
+            p_pool * (1.0 - p_pool) * (1.0 / control_exposures + 1.0 / treatment_exposures),
+        )
+    )
+    if se <= 1e-12:
+        return FrequentistComparison(z_statistic=0.0, p_value=1.0, significant_at_95=False)
+    z = (p2 - p1) / se
+    p_val = math.erfc(abs(z) / math.sqrt(2.0))
+    return FrequentistComparison(
+        z_statistic=round(z, 6),
+        p_value=round(min(1.0, max(0.0, p_val)), 6),
+        significant_at_95=p_val < 0.05,
+    )
+
+
+def evaluate_experiment_outcome(
+    *,
+    sample_adequacy: SampleAdequacy,
+    comparison: ComparisonMetrics,
+    payment_failed: PaymentFailedGuardrail,
+    checkout_abandoned: AbandonmentGuardrail,
+    thresholds: GuardrailThresholds,
+) -> tuple[ExperimentOutcome, str]:
+    """Classify explicit experiment outcome with transparent thresholds."""
+    if payment_failed.breached:
+        return (
+            ExperimentOutcome.GUARDRAIL_BREACHED,
+            (
+                f"Mandatory error guardrail breached ({payment_failed.breach_severity}): "
+                f"treatment error rate {payment_failed.treatment_rate:.2%} vs control "
+                f"{payment_failed.control_rate:.2%} (ceiling {thresholds.guardrail_max_error_rate:.2%})."
+            ),
+        )
+    if (
+        sample_adequacy.treatment_exposures >= 30
+        and sample_adequacy.control_exposures >= 30
+        and (checkout_abandoned.treatment_rate - checkout_abandoned.control_rate) >= 0.12
+    ):
+        return (
+            ExperimentOutcome.GUARDRAIL_BREACHED,
+            (
+                f"Abandonment guardrail deteriorated by "
+                f"{(checkout_abandoned.treatment_rate - checkout_abandoned.control_rate):.1%} "
+                f"(treatment {checkout_abandoned.treatment_rate:.1%} vs control {checkout_abandoned.control_rate:.1%})."
+            ),
+        )
+    if not sample_adequacy.is_adequate:
+        return (
+            ExperimentOutcome.INSUFFICIENT_DATA,
+            (
+                f"Insufficient unique participants: control={sample_adequacy.control_exposures}, "
+                f"treatment={sample_adequacy.treatment_exposures} (minimum required: {sample_adequacy.min_required} per arm)."
+            ),
+        )
+
+    p_win = comparison.prob_treatment_beats_control
+    loss_t = comparison.expected_loss_choose_treatment
+    loss_c = comparison.expected_loss_choose_control
+    cri_lo, cri_hi = comparison.absolute_lift_cri_95
+
+    if p_win >= 0.95 and loss_t <= thresholds.max_expected_loss:
+        return (
+            ExperimentOutcome.VARIANT_WINS,
+            (
+                f"Variant wins with P(Treatment > Control)={p_win:.2%} (>=95%) "
+                f"and expected loss {loss_t:.4%} <= {thresholds.max_expected_loss:.4%}."
+            ),
+        )
+    if p_win <= 0.05 and loss_c <= thresholds.max_expected_loss:
+        return (
+            ExperimentOutcome.CONTROL_WINS,
+            (
+                f"Control wins with P(Treatment > Control)={p_win:.2%} (<=5%) "
+                f"and expected loss choosing control {loss_c:.4%} <= {thresholds.max_expected_loss:.4%}."
+            ),
+        )
+    if cri_lo <= 0.0 <= cri_hi and 0.20 <= p_win <= 0.80:
+        return (
+            ExperimentOutcome.NO_CLEAR_WINNER,
+            (
+                f"No clear winner: P(Treatment > Control)={p_win:.2%} and 95% CrI "
+                f"[{cri_lo:.2%}, {cri_hi:.2%}] spans zero."
+            ),
+        )
+    return (
+        ExperimentOutcome.INCONCLUSIVE,
+        (
+            f"Directional signal only (P(Treatment > Control)={p_win:.2%}, "
+            f"expected loss={loss_t:.4%} vs limit {thresholds.max_expected_loss:.4%}); collect additional samples."
+        ),
+    )
 
 
 def _coerce_thresholds(
@@ -360,16 +519,64 @@ def run_bayesian_analysis(
     is_adequate = (
         n_c >= parsed_thresholds.min_exposures and n_t >= parsed_thresholds.min_exposures
     )
+    sample_adequacy = SampleAdequacy(
+        control_exposures=n_c,
+        treatment_exposures=n_t,
+        min_required=parsed_thresholds.min_exposures,
+        is_adequate=is_adequate,
+    )
+    comparison = ComparisonMetrics(
+        prob_treatment_beats_control=wins / m_draws,
+        absolute_lift_mean=abs_diff_sum / m_draws,
+        absolute_lift_cri_95=_ci95(abs_diff_samples),
+        relative_lift_mean=rel_lift_sum / m_draws,
+        relative_lift_cri_95=_ci95(rel_lift_samples),
+        expected_loss_choose_treatment=loss_choose_t_sum / m_draws,
+        expected_loss_choose_control=loss_choose_c_sum / m_draws,
+    )
+    pf_guardrail = PaymentFailedGuardrail(
+        control_errors=e_c,
+        control_rate=obs_err_rate_c,
+        treatment_errors=e_t,
+        treatment_rate=obs_err_rate_t,
+        control_posterior_alpha=err_alpha_c,
+        control_posterior_beta=err_beta_c,
+        control_posterior_mean=err_mean_c,
+        control_credible_interval_95=_ci95(err_c_samples),
+        treatment_posterior_alpha=err_alpha_t,
+        treatment_posterior_beta=err_beta_t,
+        treatment_posterior_mean=err_mean_t,
+        treatment_credible_interval_95=_ci95(err_t_samples),
+        prob_treatment_exceeds_soft_delta=prob_soft,
+        prob_treatment_exceeds_hard_delta=prob_hard,
+        prob_treatment_exceeds_max_error_rate=prob_max_err,
+        breached=hard_breach or soft_breach,
+        breach_severity=breach_severity,
+    )
+    aband_guardrail = AbandonmentGuardrail(
+        control_count=validated.control_abandoned,
+        treatment_count=validated.treatment_abandoned,
+        control_rate=obs_abandoned_rate_c,
+        treatment_rate=obs_abandoned_rate_t,
+    )
+    frequentist = compute_frequentist_z_test(
+        control_exposures=n_c,
+        control_conversions=k_c,
+        treatment_exposures=n_t,
+        treatment_conversions=k_t,
+    )
+    exp_outcome, outcome_rationale = evaluate_experiment_outcome(
+        sample_adequacy=sample_adequacy,
+        comparison=comparison,
+        payment_failed=pf_guardrail,
+        checkout_abandoned=aband_guardrail,
+        thresholds=parsed_thresholds,
+    )
 
     return BayesianAnalysisResult(
         experiment_id=validated.experiment_id,
         analytics_mode=validated.analytics_mode,
-        sample_adequacy=SampleAdequacy(
-            control_exposures=n_c,
-            treatment_exposures=n_t,
-            min_required=parsed_thresholds.min_exposures,
-            is_adequate=is_adequate,
-        ),
+        sample_adequacy=sample_adequacy,
         control=VariantPosterior(
             exposures=n_c,
             conversions=k_c,
@@ -386,41 +593,28 @@ def run_bayesian_analysis(
             mean_rate=mean_t,
             credible_interval_95=_ci95(p_t_samples),
         ),
-        comparison=ComparisonMetrics(
-            prob_treatment_beats_control=wins / m_draws,
-            absolute_lift_mean=abs_diff_sum / m_draws,
-            absolute_lift_cri_95=_ci95(abs_diff_samples),
-            relative_lift_mean=rel_lift_sum / m_draws,
-            relative_lift_cri_95=_ci95(rel_lift_samples),
-            expected_loss_choose_treatment=loss_choose_t_sum / m_draws,
-            expected_loss_choose_control=loss_choose_c_sum / m_draws,
+        comparison=comparison,
+        frequentist=frequentist,
+        participant_metrics=ParticipantMetricsSummary(
+            control_unique_participants=n_c,
+            treatment_unique_participants=n_t,
+            control_raw_exposures=n_c,
+            treatment_raw_exposures=n_t,
+            control_total_conversions=k_c,
+            treatment_total_conversions=k_t,
+            control_unique_conversions=k_c,
+            treatment_unique_conversions=k_t,
+            control_conversion_rate=round(k_c / n_c, 6) if n_c > 0 else 0.0,
+            treatment_conversion_rate=round(k_t / n_t, 6) if n_t > 0 else 0.0,
+            deduplicated_events=0,
+            total_events_processed=n_c + n_t,
+            unattributed_events=0,
         ),
+        experiment_outcome=exp_outcome,
+        outcome_rationale=outcome_rationale,
         guardrails=GuardrailsSummary(
-            payment_failed=PaymentFailedGuardrail(
-                control_errors=e_c,
-                control_rate=obs_err_rate_c,
-                treatment_errors=e_t,
-                treatment_rate=obs_err_rate_t,
-                control_posterior_alpha=err_alpha_c,
-                control_posterior_beta=err_beta_c,
-                control_posterior_mean=err_mean_c,
-                control_credible_interval_95=_ci95(err_c_samples),
-                treatment_posterior_alpha=err_alpha_t,
-                treatment_posterior_beta=err_beta_t,
-                treatment_posterior_mean=err_mean_t,
-                treatment_credible_interval_95=_ci95(err_t_samples),
-                prob_treatment_exceeds_soft_delta=prob_soft,
-                prob_treatment_exceeds_hard_delta=prob_hard,
-                prob_treatment_exceeds_max_error_rate=prob_max_err,
-                breached=hard_breach or soft_breach,
-                breach_severity=breach_severity,
-            ),
-            checkout_abandoned=AbandonmentGuardrail(
-                control_count=validated.control_abandoned,
-                treatment_count=validated.treatment_abandoned,
-                control_rate=obs_abandoned_rate_c,
-                treatment_rate=obs_abandoned_rate_t,
-            ),
+            payment_failed=pf_guardrail,
+            checkout_abandoned=aband_guardrail,
         ),
         thresholds=parsed_thresholds,
         mc_samples=m_draws,
@@ -512,20 +706,30 @@ def aggregate_experiment_events(
     treatment_err_users: set[str] = set()
     control_aband_users: set[str] = set()
     treatment_aband_users: set[str] = set()
+    control_raw_exp = 0
+    treatment_raw_exp = 0
+    control_total_conv = 0
+    treatment_total_conv = 0
 
     for _, user_id, var_key, event_type in normalized_events:
         assigned_arm = user_arm.get(user_id)
         if assigned_arm is None or assigned_arm != var_key:
             continue
         if assigned_arm == control_variation:
-            if event_type == primary_metric:
+            if event_type == exposure_event:
+                control_raw_exp += 1
+            elif event_type == primary_metric:
+                control_total_conv += 1
                 control_conv_users.add(user_id)
             elif event_type == error_metric:
                 control_err_users.add(user_id)
             elif event_type == abandonment_metric:
                 control_aband_users.add(user_id)
         else:
-            if event_type == primary_metric:
+            if event_type == exposure_event:
+                treatment_raw_exp += 1
+            elif event_type == primary_metric:
+                treatment_total_conv += 1
                 treatment_conv_users.add(user_id)
             elif event_type == error_metric:
                 treatment_err_users.add(user_id)
@@ -541,6 +745,10 @@ def aggregate_experiment_events(
         treatment_errors=len(treatment_err_users),
         control_abandoned=len(control_aband_users),
         treatment_abandoned=len(treatment_aband_users),
+        control_raw_exposures=control_raw_exp,
+        treatment_raw_exposures=treatment_raw_exp,
+        control_total_conversions=control_total_conv,
+        treatment_total_conversions=treatment_total_conv,
         total_events_processed=total_count,
         deduplicated_events=dedup_count,
         unattributed_events=unattributed,
@@ -555,6 +763,8 @@ def analyze_experiment_events(
     control_variation: str = "control",
     treatment_variation: str = "treatment",
     primary_metric: str = "checkout_completed",
+    error_metric: str = "payment_failed",
+    abandonment_metric: str = "checkout_abandoned",
     variation_map: Mapping[str, str] | None = None,
     alpha_0: float = 1.0,
     beta_0: float = 1.0,
@@ -568,9 +778,11 @@ def analyze_experiment_events(
         control_variation=control_variation,
         treatment_variation=treatment_variation,
         primary_metric=primary_metric,
+        error_metric=error_metric,
+        abandonment_metric=abandonment_metric,
         variation_map=variation_map,
     )
-    return run_bayesian_analysis(
+    res = run_bayesian_analysis(
         control_exposures=counts.control_exposures,
         control_conversions=counts.control_conversions,
         treatment_exposures=counts.treatment_exposures,
@@ -587,3 +799,27 @@ def analyze_experiment_events(
         seed=seed,
         thresholds=thresholds,
     )
+    res.participant_metrics = ParticipantMetricsSummary(
+        control_unique_participants=counts.control_exposures,
+        treatment_unique_participants=counts.treatment_exposures,
+        control_raw_exposures=counts.control_raw_exposures,
+        treatment_raw_exposures=counts.treatment_raw_exposures,
+        control_total_conversions=counts.control_total_conversions,
+        treatment_total_conversions=counts.treatment_total_conversions,
+        control_unique_conversions=counts.control_conversions,
+        treatment_unique_conversions=counts.treatment_conversions,
+        control_conversion_rate=(
+            round(counts.control_conversions / counts.control_exposures, 6)
+            if counts.control_exposures > 0
+            else 0.0
+        ),
+        treatment_conversion_rate=(
+            round(counts.treatment_conversions / counts.treatment_exposures, 6)
+            if counts.treatment_exposures > 0
+            else 0.0
+        ),
+        deduplicated_events=counts.deduplicated_events,
+        total_events_processed=counts.total_events_processed,
+        unattributed_events=counts.unattributed_events,
+    )
+    return res

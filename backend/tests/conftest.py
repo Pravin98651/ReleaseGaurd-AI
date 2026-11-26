@@ -15,9 +15,10 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-# Ensure test runs never depend on Postgres/Docker.
+# Ensure test runs never depend on Postgres/Docker or local .env auth toggle.
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("USE_SQLITE_FALLBACK", "true")
+os.environ.setdefault("REQUIRE_AUTH", "false")
 
 from app.core.database import create_async_engine_from_settings
 from app.models import Base

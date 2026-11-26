@@ -438,7 +438,18 @@ function ExperimentsInner() {
                     )}
                     <button
                       type="button"
-                      disabled={busyAction !== null}
+                      disabled={
+                        busyAction !== null ||
+                        analysis?.experiment_outcome === "GUARDRAIL_BREACHED" ||
+                        Boolean(analysis?.readiness && !analysis.readiness.is_ready_for_winner_decision)
+                      }
+                      title={
+                        analysis?.experiment_outcome === "GUARDRAIL_BREACHED"
+                          ? "Blocked: mandatory guardrail breached"
+                          : analysis?.readiness && !analysis.readiness.is_ready_for_winner_decision
+                            ? "Blocked: experiment readiness criteria not met"
+                            : "Queue Category C human approval to promote winner"
+                      }
                       onClick={() => void handlePromoteWinner(selectedExp)}
                       className="inline-flex items-center gap-1 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-indigo-400 disabled:opacity-50"
                     >
@@ -527,34 +538,80 @@ function ExperimentsInner() {
               {/* Bayesian Metrics & Charts */}
               {analysis && (
                 <>
-                  {/* Sample Adequacy Bar */}
+                  {/* Explicit Experiment Outcome & Sample Adequacy Bar */}
                   <div
                     className={cn(
-                      "flex flex-wrap items-center justify-between gap-2 rounded-xl border px-4 py-3 text-xs",
-                      analysis.sample_adequacy.is_adequate
-                        ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-                        : "border-amber-500/35 bg-amber-500/10 text-amber-200"
+                      "flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 text-xs",
+                      analysis.experiment_outcome === "GUARDRAIL_BREACHED"
+                        ? "border-rose-500/40 bg-rose-500/10 text-rose-200"
+                        : analysis.experiment_outcome === "VARIANT_WINS" ||
+                            analysis.experiment_outcome === "CONTROL_WINS"
+                          ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-200"
+                          : "border-amber-500/35 bg-amber-500/10 text-amber-200"
                     )}
                   >
                     <div className="flex items-center gap-2">
-                      {analysis.sample_adequacy.is_adequate ? (
+                      {analysis.sample_adequacy.is_adequate &&
+                      analysis.experiment_outcome !== "GUARDRAIL_BREACHED" ? (
                         <CheckCircle2 className="h-4 w-4 text-emerald-400" />
                       ) : (
                         <AlertTriangle className="h-4 w-4 text-amber-400" />
                       )}
-                      <span>
-                        Sample Adequacy:{" "}
-                        <strong>
-                          {analysis.sample_adequacy.is_adequate
-                            ? "Adequate"
-                            : "Insufficient Sample"}
-                        </strong>{" "}
-                        (Control: {analysis.sample_adequacy.control_exposures}, Treatment:{" "}
-                        {analysis.sample_adequacy.treatment_exposures} / min{" "}
-                        {analysis.sample_adequacy.min_required} per variant)
-                      </span>
+                      <div>
+                        <span className="font-mono font-semibold uppercase">
+                          {analysis.experiment_outcome ?? (analysis.sample_adequacy.is_adequate ? "ADEQUATE" : "INSUFFICIENT_DATA")}
+                        </span>
+                        <span className="ml-2">
+                          {analysis.outcome_rationale ||
+                            `Control: ${analysis.sample_adequacy.control_exposures}, Treatment: ${analysis.sample_adequacy.treatment_exposures} (min ${analysis.sample_adequacy.min_required}/arm)`}
+                        </span>
+                      </div>
                     </div>
+                    {analysis.flagsmith_native_summary && (
+                      <span className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 font-mono text-[11px] text-slate-300">
+                        Flagsmith Native:{" "}
+                        {analysis.flagsmith_native_summary.available
+                          ? analysis.flagsmith_native_summary.is_final
+                            ? "Final"
+                            : "Aggregating (is_final=false)"
+                          : "Unavailable"}
+                      </span>
+                    )}
                   </div>
+
+                  {/* Distinct Participants, Exposures, and Conversions */}
+                  {analysis.participant_metrics && (
+                    <div className="grid gap-3 sm:grid-cols-4 text-xs tabular-nums">
+                      <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-3">
+                        <div className="text-slate-400">Unique Participants</div>
+                        <div className="mt-1 font-mono font-semibold text-slate-100">
+                          C: {analysis.participant_metrics.control_unique_participants} / T:{" "}
+                          {analysis.participant_metrics.treatment_unique_participants}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-3">
+                        <div className="text-slate-400">Raw Exposures (Deduped: {analysis.participant_metrics.deduplicated_events})</div>
+                        <div className="mt-1 font-mono font-semibold text-slate-100">
+                          C: {analysis.participant_metrics.control_raw_exposures} / T:{" "}
+                          {analysis.participant_metrics.treatment_raw_exposures}
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-3">
+                        <div className="text-slate-400">Total vs Unique Conversions</div>
+                        <div className="mt-1 font-mono font-semibold text-slate-100">
+                          C: {analysis.participant_metrics.control_total_conversions} ({analysis.participant_metrics.control_unique_conversions}u) · T:{" "}
+                          {analysis.participant_metrics.treatment_total_conversions} ({analysis.participant_metrics.treatment_unique_conversions}u)
+                        </div>
+                      </div>
+                      <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-3">
+                        <div className="text-slate-400">Observed Conv. Rate</div>
+                        <div className="mt-1 font-mono font-semibold text-slate-100">
+                          C: {(analysis.participant_metrics.control_conversion_rate * 100).toFixed(2)}% / T:{" "}
+                          {(analysis.participant_metrics.treatment_conversion_rate * 100).toFixed(2)}%
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   {/* Key Bayesian KPIs */}
                   <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
@@ -565,7 +622,7 @@ function ExperimentsInner() {
                       ).toFixed(2)}%`}
                       subtext={`Rel lift: ${(
                         analysis.comparison.relative_lift_mean * 100
-                      ).toFixed(1)}%`}
+                      ).toFixed(1)}%${analysis.frequentist ? ` · Freq p=${analysis.frequentist.p_value.toFixed(4)}` : ""}`}
                       tone={
                         analysis.comparison.prob_treatment_beats_control >= 0.9
                           ? "emerald"
@@ -598,6 +655,42 @@ function ExperimentsInner() {
                       )}`}
                     />
                   </div>
+
+                  {/* Experiment Readiness Checklist */}
+                  {analysis.readiness && (
+                    <SectionCard
+                      title="Experiment Readiness Gate"
+                      subtitle="All criteria must pass before recommending or promoting a winner"
+                      actions={
+                        <StatusBadge
+                          status={analysis.readiness.is_ready_for_winner_decision ? "passed" : "warning"}
+                          label={analysis.readiness.is_ready_for_winner_decision ? "Ready" : "Not Ready"}
+                        />
+                      }
+                    >
+                      <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 text-xs">
+                        {analysis.readiness.checks.map((chk) => (
+                          <div
+                            key={chk.key}
+                            className={cn(
+                              "rounded-lg border p-2.5",
+                              chk.passed
+                                ? "border-emerald-500/30 bg-emerald-500/5"
+                                : "border-amber-500/30 bg-amber-500/5"
+                            )}
+                          >
+                            <div className="flex items-center justify-between font-medium text-slate-200">
+                              <span>{chk.label}</span>
+                              <span className={chk.passed ? "text-emerald-400" : "text-amber-400"}>
+                                {chk.passed ? "PASS" : "BLOCK"}
+                              </span>
+                            </div>
+                            <div className="mt-1 font-mono text-[11px] text-slate-400">{chk.detail}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </SectionCard>
+                  )}
 
                   {/* Recharts */}
                   <div className="grid gap-6 xl:grid-cols-2">

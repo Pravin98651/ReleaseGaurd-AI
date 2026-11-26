@@ -485,3 +485,57 @@ def test_recommendations_search_kill_switches_and_event_tracking() -> None:
         assert trk.json()["tracked"] is True
         assert trk.json()["sdk_tracked"] is True
 
+
+def test_exposure_idempotency_on_repeated_flag_refresh() -> None:
+    captured: list[dict[str, Any]] = []
+    settings = DemoSettings(FLAGSMITH_SERVER_ENV_KEY="")
+    telemetry = TelemetryEmitter(settings, http_client=_make_mock_ingest_client(captured))
+    app = create_app(settings=settings, telemetry=telemetry)
+
+    with TestClient(app) as client:
+        r1 = client.get("/api/flags", params={"user_id": "shopper_77", "session_key": "sess_abc"})
+        r2 = client.get("/api/flags", params={"user_id": "shopper_77", "session_key": "sess_abc"})
+        assert r1.status_code == 200
+        assert r2.status_code == 200
+
+    assert len(captured) == 2
+    ev1 = captured[0]["body"]["events"][0]
+    ev2 = captured[1]["body"]["events"][0]
+    assert ev1["event_id"] == ev2["event_id"]
+
+
+def test_simulator_scenarios_and_deterministic_replay() -> None:
+    captured: list[dict[str, Any]] = []
+    settings = DemoSettings(FLAGSMITH_SERVER_ENV_KEY="")
+    telemetry = TelemetryEmitter(settings, http_client=_make_mock_ingest_client(captured))
+    app = create_app(settings=settings, telemetry=telemetry)
+
+    with TestClient(app) as client:
+        insuff = client.post(
+            "/api/simulate",
+            json={"users_count": 200, "scenario": "insufficient_sample", "seed": 11},
+        )
+        assert insuff.status_code == 200
+        insuff_data = insuff.json()
+        assert insuff_data["synthetic_test_traffic"] is True
+        assert insuff_data["users_count"] == 40
+
+        breach = client.post(
+            "/api/simulate",
+            json={"users_count": 100, "scenario": "guardrail_breach", "seed": 99},
+        )
+        assert breach.status_code == 200
+        b_data = breach.json()
+        assert b_data["treatment"]["error_rate"] > 0.10
+        assert len(b_data["execution_logs"]) >= 2
+
+        replay = client.post(
+            "/api/simulate",
+            json={"users_count": 100, "scenario": "guardrail_breach", "seed": 99},
+        )
+        assert replay.status_code == 200
+        assert (
+            replay.json()["sample_events"][0]["event_id"]
+            == b_data["sample_events"][0]["event_id"]
+        )
+

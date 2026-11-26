@@ -61,6 +61,12 @@ class TestHarnessRunRequest(BaseModel):
     """Synthetic test traffic generation request (strictly blocked on production)."""
 
     identities_per_arm: int = Field(default=30, ge=5, le=200)
+    scenario: str = Field(
+        default="winning_variant",
+        description="winning_variant | healthy_control | underperforming_variant | neutral | guardrail_breach | insufficient_sample",
+    )
+    seed: int = Field(default=42, ge=1, le=1_000_000)
+    start_index: int = Field(default=0, ge=0, le=100_000)
     profile: dict[str, dict[str, float]] | None = None
 
 
@@ -305,6 +311,9 @@ async def run_synthetic_experiment_harness(
         experiment=exp,
         profile=body.profile,
         identities_per_arm=body.identities_per_arm,
+        scenario=body.scenario,
+        seed=body.seed,
+        start_index=body.start_index,
     )
     await PolicyEngine.record_audit_log(
         session,

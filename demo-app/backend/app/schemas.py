@@ -78,10 +78,20 @@ class SimulateRequest(BaseModel):
     """Simulation parameters for generating cohort experiment journeys."""
 
     users_count: int = Field(default=120, ge=1, le=500)
-    scenario: Literal["healthy_v2", "buggy_v2", "neutral"] = "healthy_v2"
+    scenario: Literal[
+        "healthy_v2",
+        "buggy_v2",
+        "neutral",
+        "healthy_control",
+        "winning_variant",
+        "underperforming_variant",
+        "guardrail_breach",
+        "insufficient_sample",
+    ] = "healthy_v2"
     environment_name: str | None = Field(default=None, max_length=64)
     split_mode: Literal["auto", "flagsmith", "simulated_50_50"] = "auto"
     seed: int = 42
+    start_index: int = Field(default=1, ge=1, le=10000)
 
 
 class VariantMetrics(BaseModel):
@@ -101,8 +111,11 @@ class VariantMetrics(BaseModel):
 class SimulateResponse(BaseModel):
     """Aggregated simulation report returned by POST /api/simulate."""
 
-    scenario: Literal["healthy_v2", "buggy_v2", "neutral"]
+    synthetic_test_traffic: bool = True
+    scenario: str
     users_count: int
+    seed: int = 42
+    start_index: int = 1
     evaluation_mode: Literal["flagsmith_live", "simulated_split"]
     flagsmith_connected: bool
     environment_name: str
@@ -115,6 +128,7 @@ class SimulateResponse(BaseModel):
     ingest_error: str | None = None
     control: VariantMetrics
     treatment: VariantMetrics
+    execution_logs: list[str] = Field(default_factory=list)
     sample_events: list[dict[str, Any]]
 
 

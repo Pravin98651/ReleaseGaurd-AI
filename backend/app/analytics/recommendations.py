@@ -7,12 +7,17 @@ docs/architecture.md Section 6.3.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from app.analytics.bayesian import BayesianAnalysisResult, GuardrailThresholds
+from app.analytics.bayesian import (
+    BayesianAnalysisResult,
+    ExperimentOutcome,
+    GuardrailThresholds,
+)
 
 
 class RecommendationStatus(StrEnum):
@@ -454,4 +459,176 @@ def evaluate_recommendation(
             f"(control={n_c}, treatment={n_t}), guardrails are safe, and evidence is inconclusive "
             f"(P(T > C)={p_beats:.1%}, expected_loss={loss_treat:.4%})."
         ),
+    )
+
+
+class ExperimentReadinessCheck(BaseModel):
+    """Single check inside the 7-point Experiment Readiness Report."""
+
+    key: str
+    label: str
+    passed: bool
+    detail: str
+
+
+class ExperimentReadinessReport(BaseModel):
+    """Comprehensive readiness gate before recommending or promoting an experiment winner."""
+
+    is_ready_for_winner_decision: bool
+    checks: list[ExperimentReadinessCheck]
+    blocking_reasons: list[str]
+
+
+def map_flagsmith_native_results(
+    native_res: Mapping[str, Any] | None,
+    *,
+    max_stale_hours: float = 24.0,
+) -> dict[str, Any]:
+    """Normalize Flagsmith native /results/ payload and detect stale warehouse data."""
+    if not native_res or not native_res.get("available"):
+        return {
+            "available": False,
+            "is_final": False,
+            "as_of": None,
+            "stale": True,
+            "metric_id": None,
+            "srm_p_value": None,
+            "variants": {},
+            "note": "Flagsmith native results unavailable or not yet refreshed; local Beta-Binomial complements Flagsmith.",
+        }
+
+    inner = (native_res.get("results") or {}).get("results") or {}
+    as_of_raw = inner.get("as_of")
+    is_final = bool(inner.get("is_final", False))
+    payload = inner.get("payload") or {}
+    metrics = payload.get("metrics") or []
+    first_metric = metrics[0] if metrics and isinstance(metrics[0], Mapping) else {}
+
+    stale = False
+    if isinstance(as_of_raw, str) and as_of_raw.strip():
+        try:
+            ts = datetime.fromisoformat(as_of_raw.strip().replace("Z", "+00:00"))
+            age_hours = (datetime.now(UTC) - ts).total_seconds() / 3600.0
+            stale = age_hours > max_stale_hours
+        except ValueError:
+            stale = True
+    else:
+        stale = True
+
+    return {
+        "available": True,
+        "status_code": native_res.get("status_code"),
+        "is_final": is_final,
+        "as_of": as_of_raw,
+        "stale": stale,
+        "metric_id": first_metric.get("metric_id"),
+        "srm_p_value": payload.get("srm_p_value"),
+        "variants": first_metric.get("variants") or {},
+        "note": "Flagsmith native metrics complement ReleaseGuard Bayesian posteriors; neither replaces the other.",
+    }
+
+
+def evaluate_experiment_readiness(
+    *,
+    analysis: BayesianAnalysisResult,
+    experiment_status: str,
+    analytics_mode: str,
+    flagsmith_experiment_id: str | None,
+    started_at: datetime | None,
+    latest_event_at: datetime | None,
+    native_summary: Mapping[str, Any] | None = None,
+    min_observation_minutes: float = 0.0,
+) -> ExperimentReadinessReport:
+    """Validate 7 readiness criteria before recommending or promoting a winner."""
+    now = datetime.now(UTC)
+    n_c = analysis.control.exposures
+    n_t = analysis.treatment.exposures
+    min_req = analysis.sample_adequacy.min_required
+
+    obs_minutes = 0.0
+    if started_at is not None:
+        st = started_at if started_at.tzinfo else started_at.replace(tzinfo=UTC)
+        obs_minutes = max(0.0, (now - st).total_seconds() / 60.0)
+    obs_ok = (started_at is not None) and (obs_minutes >= min_observation_minutes)
+
+    fresh_ok = False
+    fresh_detail = "No telemetry events recorded yet."
+    if latest_event_at is not None:
+        le = latest_event_at if latest_event_at.tzinfo else latest_event_at.replace(tzinfo=UTC)
+        age_hours = max(0.0, (now - le).total_seconds() / 3600.0)
+        fresh_ok = age_hours <= 24.0
+        fresh_detail = f"Latest event {age_hours:.2f}h ago (limit 24h)."
+
+    pm = analysis.participant_metrics
+    unattributed = pm.unattributed_events if pm else 0
+    mapping_ok = (n_c + n_t) > 0 and (unattributed <= max(5, n_c + n_t))
+
+    total_convs = analysis.control.conversions + analysis.treatment.conversions
+    conv_ok = total_convs > 0
+
+    guardrail_ok = analysis.experiment_outcome != ExperimentOutcome.GUARDRAIL_BREACHED
+
+    fs_ok = experiment_status in ("running", "completed") and (
+        analytics_mode != "flagsmith_native" or bool(flagsmith_experiment_id)
+    )
+
+    checks = [
+        ExperimentReadinessCheck(
+            key="min_participants_per_arm",
+            label="Minimum Unique Participants Per Arm",
+            passed=analysis.sample_adequacy.is_adequate,
+            detail=f"control={n_c}, treatment={n_t}, min_required={min_req}",
+        ),
+        ExperimentReadinessCheck(
+            key="min_observation_period",
+            label="Minimum Observation Period",
+            passed=obs_ok,
+            detail=f"observed={obs_minutes:.1f}m (required>={min_observation_minutes:.1f}m)",
+        ),
+        ExperimentReadinessCheck(
+            key="results_freshness",
+            label="Results Freshness",
+            passed=fresh_ok,
+            detail=fresh_detail,
+        ),
+        ExperimentReadinessCheck(
+            key="event_mapping",
+            label="Event & Variant Attribution",
+            passed=mapping_ok,
+            detail=f"attributed={n_c + n_t}, unattributed={unattributed}",
+        ),
+        ExperimentReadinessCheck(
+            key="sufficient_conversion_data",
+            label="Conversion Signal Present",
+            passed=conv_ok,
+            detail=f"total_unique_conversions={total_convs}",
+        ),
+        ExperimentReadinessCheck(
+            key="guardrail_health",
+            label="Mandatory Guardrail Health",
+            passed=guardrail_ok,
+            detail=analysis.outcome_rationale or "Guardrails within bounds.",
+        ),
+        ExperimentReadinessCheck(
+            key="flagsmith_status",
+            label="Flagsmith Experiment Status",
+            passed=fs_ok,
+            detail=f"status={experiment_status}, fs_exp_id={flagsmith_experiment_id or 'none'}",
+        ),
+    ]
+    if native_summary and native_summary.get("available") and native_summary.get("stale"):
+        checks.append(
+            ExperimentReadinessCheck(
+                key="flagsmith_native_freshness",
+                label="Flagsmith Native Refresh Freshness",
+                passed=False,
+                detail="Flagsmith native results are stale (>24h); refresh recommended.",
+            )
+        )
+
+    blocking = [f"{c.label}: {c.detail}" for c in checks if not c.passed]
+    return ExperimentReadinessReport(
+        is_ready_for_winner_decision=len(blocking) == 0,
+        checks=checks,
+        blocking_reasons=blocking,
     )

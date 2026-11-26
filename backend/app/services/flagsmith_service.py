@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import random
 import shutil
 import subprocess
 import uuid
@@ -504,6 +505,9 @@ class FlagsmithGovernanceService:
         experiment: Experiment,
         profile: dict[str, dict[str, float]] | None = None,
         identities_per_arm: int = 30,
+        scenario: str = "winning_variant",
+        seed: int = 42,
+        start_index: int = 0,
     ) -> dict[str, Any]:
         """Run repeatable synthetic test traffic through Flagsmith identity evaluation + telemetry."""
         flag = await ctx.session.get(FeatureFlag, experiment.feature_flag_id)
@@ -521,77 +525,143 @@ class FlagsmithGovernanceService:
             env_name, flag=flag, project_id=flag.flagsmith_project_id
         )
 
-        # Deterministic conversion probabilities strictly labelled as synthetic_test_traffic=True
-        default_profile = {
-            experiment.control_variation: {"conv_prob": 0.12, "err_prob": 0.01},
-            experiment.treatment_variation: {"conv_prob": 0.24, "err_prob": 0.015},
+        scenario_profiles: dict[str, dict[str, dict[str, float]]] = {
+            "winning_variant": {
+                experiment.control_variation: {"conv_prob": 0.12, "err_prob": 0.01},
+                experiment.treatment_variation: {"conv_prob": 0.26, "err_prob": 0.01},
+            },
+            "healthy_control": {
+                experiment.control_variation: {"conv_prob": 0.22, "err_prob": 0.01},
+                experiment.treatment_variation: {"conv_prob": 0.12, "err_prob": 0.012},
+            },
+            "underperforming_variant": {
+                experiment.control_variation: {"conv_prob": 0.18, "err_prob": 0.01},
+                experiment.treatment_variation: {"conv_prob": 0.08, "err_prob": 0.015},
+            },
+            "neutral": {
+                experiment.control_variation: {"conv_prob": 0.14, "err_prob": 0.012},
+                experiment.treatment_variation: {"conv_prob": 0.145, "err_prob": 0.013},
+            },
+            "guardrail_breach": {
+                experiment.control_variation: {"conv_prob": 0.12, "err_prob": 0.01},
+                experiment.treatment_variation: {"conv_prob": 0.15, "err_prob": 0.16},
+            },
+            "insufficient_sample": {
+                experiment.control_variation: {"conv_prob": 0.12, "err_prob": 0.01},
+                experiment.treatment_variation: {"conv_prob": 0.28, "err_prob": 0.01},
+            },
         }
-        arm_cfg = profile or default_profile
-        arms = list(arm_cfg.keys())
+        arm_cfg = profile or scenario_profiles.get(scenario, scenario_profiles["winning_variant"])
         per_arm = max(5, min(int(identities_per_arm), 200))
-        batch_id = uuid.uuid4().hex[:8]
+        if scenario == "insufficient_sample":
+            per_arm = min(per_arm, 20)
+        total_identities = per_arm * len(arm_cfg)
+        batch_id = hashlib.sha256(
+            f"{experiment.id}:{scenario}:{seed}:{start_index}:{total_identities}".encode()
+        ).hexdigest()[:8]
+        rng = random.Random(seed)
         exposures_recorded = 0
         conversions_recorded = 0
         guardrail_errors_recorded = 0
+        deduplicated_skipped = 0
+        observed_assignments: dict[str, int] = {}
+        execution_logs: list[str] = [
+            f"Starting harness batch={batch_id} scenario={scenario} seed={seed} "
+            f"start_index={start_index} total_identities={total_identities} env={env_name}"
+        ]
         now = utcnow()
         sem = asyncio.Semaphore(8)
 
-        async def _eval_one(arm_name: str, idx: int) -> tuple[str, str, int, str]:
-            uid = f"sim_{batch_id}_{arm_name}_{idx}"
+        async def _eval_one(idx: int) -> tuple[str, int, str]:
+            uid = f"sim_{scenario}_{seed}_{idx:04d}"
             async with sem:
                 try:
                     eval_res = await client.evaluate_identity_detailed(
                         env_key,
                         identifier=uid,
-                        traits={"synthetic_cohort": arm_name, "is_test_traffic": True},
+                        traits={"synthetic_test_traffic": True, "scenario": scenario},
                     )
                     assigned_info = eval_res["flags"].get(flag.key)
-                    observed_var = (
-                        str(assigned_info.get("value") or arm_name)
-                        if assigned_info and assigned_info.get("value")
-                        else arm_name
+                    raw_val = (
+                        str(assigned_info.get("value"))
+                        if assigned_info and assigned_info.get("value") is not None
+                        else ""
                     )
+                    if raw_val in arm_cfg:
+                        observed_var = raw_val
+                    elif assigned_info and assigned_info.get("enabled") is True:
+                        observed_var = experiment.treatment_variation
+                    else:
+                        observed_var = experiment.control_variation
                 except FlagsmithAPIError:
-                    observed_var = arm_name
-            return arm_name, uid, idx, observed_var
+                    observed_var = (
+                        experiment.treatment_variation if idx % 2 == 0 else experiment.control_variation
+                    )
+            return uid, idx, observed_var
 
-        tasks = [
-            _eval_one(arm, idx)
-            for arm in arms
-            for idx in range(per_arm)
+        evaluated = await asyncio.gather(
+            *[_eval_one(idx) for idx in range(start_index, start_index + total_identities)]
+        )
+
+        candidate_ids = [
+            suffix_id
+            for _, idx, _ in evaluated
+            for suffix_id in (
+                f"sim_{batch_id}_{flag.key}_{idx}_exp",
+                f"sim_{batch_id}_{flag.key}_{idx}_err",
+                f"sim_{batch_id}_{flag.key}_{idx}_conv",
+            )
         ]
-        evaluated = await asyncio.gather(*tasks)
+        existing_ids = set(
+            (
+                await ctx.session.execute(
+                    select(ExperimentEvent.event_id).where(
+                        ExperimentEvent.event_id.in_(candidate_ids)
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
 
-        for arm, uid, idx, observed_var in evaluated:
-            probs = arm_cfg[arm]
+        for uid, idx, observed_var in evaluated:
+            observed_assignments[observed_var] = observed_assignments.get(observed_var, 0) + 1
+            probs = arm_cfg.get(observed_var, arm_cfg[experiment.control_variation])
             conv_prob = float(probs.get("conv_prob", 0.1))
             err_prob = float(probs.get("err_prob", 0.01))
-            conv_cutoff = int(conv_prob * per_arm)
-            err_cutoff = int(err_prob * per_arm)
 
             common_props = {
                 "synthetic_test_traffic": True,
                 "simulator": True,
+                "source": "synthetic_test_harness",
+                "scenario": scenario,
+                "seed": seed,
                 "batch_id": batch_id,
-                "target_arm": arm,
                 "observed_flagsmith_variation": observed_var,
             }
-            exp_evt = ExperimentEvent(
-                event_id=f"sim_{batch_id}_{arm}_{idx}_exp",
-                experiment_id=experiment.id,
-                flag_key=flag.key,
-                environment_name=env_name,
-                variation_key=arm,
-                event_type=ExperimentEventType.FEATURE_VARIATION_ASSIGNED,
-                user_identifier=uid,
-                session_key=f"sim_{batch_id}",
-                properties=common_props,
-                occurred_at=now,
+            exp_event_id = f"sim_{batch_id}_{flag.key}_{idx}_exp"
+            if exp_event_id in existing_ids:
+                deduplicated_skipped += 1
+                continue
+
+            ctx.session.add(
+                ExperimentEvent(
+                    event_id=exp_event_id,
+                    experiment_id=experiment.id,
+                    flag_key=flag.key,
+                    environment_name=env_name,
+                    variation_key=observed_var,
+                    event_type=ExperimentEventType.FEATURE_VARIATION_ASSIGNED,
+                    user_identifier=uid,
+                    session_key=f"sim_{batch_id}_{uid}",
+                    properties=common_props,
+                    occurred_at=now,
+                )
             )
-            ctx.session.add(exp_evt)
             exposures_recorded += 1
 
-            if idx < err_cutoff:
+            roll = rng.random()
+            if roll < err_prob:
                 guardrail_metric = (
                     experiment.guardrail_metrics[0]
                     if experiment.guardrail_metrics
@@ -604,20 +674,20 @@ class FlagsmithGovernanceService:
                 )
                 ctx.session.add(
                     ExperimentEvent(
-                        event_id=f"sim_{batch_id}_{arm}_{idx}_err",
+                        event_id=f"sim_{batch_id}_{flag.key}_{idx}_err",
                         experiment_id=experiment.id,
                         flag_key=flag.key,
                         environment_name=env_name,
-                        variation_key=arm,
+                        variation_key=observed_var,
                         event_type=err_enum,
                         user_identifier=uid,
-                        session_key=f"sim_{batch_id}",
+                        session_key=f"sim_{batch_id}_{uid}",
                         properties=common_props,
                         occurred_at=now,
                     )
                 )
                 guardrail_errors_recorded += 1
-            elif idx < conv_cutoff + err_cutoff:
+            elif roll < err_prob + conv_prob:
                 primary_enum = (
                     ExperimentEventType(experiment.primary_metric)
                     if experiment.primary_metric in {e.value for e in ExperimentEventType}
@@ -625,14 +695,14 @@ class FlagsmithGovernanceService:
                 )
                 ctx.session.add(
                     ExperimentEvent(
-                        event_id=f"sim_{batch_id}_{arm}_{idx}_conv",
+                        event_id=f"sim_{batch_id}_{flag.key}_{idx}_conv",
                         experiment_id=experiment.id,
                         flag_key=flag.key,
                         environment_name=env_name,
-                        variation_key=arm,
+                        variation_key=observed_var,
                         event_type=primary_enum,
                         user_identifier=uid,
-                        session_key=f"sim_{batch_id}",
+                        session_key=f"sim_{batch_id}_{uid}",
                         numeric_value=149.0,
                         properties=common_props,
                         occurred_at=now,
@@ -641,6 +711,11 @@ class FlagsmithGovernanceService:
                 conversions_recorded += 1
 
         await ctx.session.commit()
+        execution_logs.append(
+            f"Recorded exposures={exposures_recorded}, conversions={conversions_recorded}, "
+            f"guardrail_errors={guardrail_errors_recorded}, deduplicated={deduplicated_skipped}; "
+            f"assignments={observed_assignments}"
+        )
 
         native_refresh: dict[str, Any] | None = None
         native_results: dict[str, Any] | None = None
@@ -652,18 +727,28 @@ class FlagsmithGovernanceService:
                 native_results = await client.get_experiment_results(
                     env_key, experiment.flagsmith_experiment_id
                 )
+                execution_logs.append(
+                    f"Flagsmith native results refreshed for exp #{experiment.flagsmith_experiment_id}."
+                )
             except FlagsmithAPIError as exc:
                 native_results = {"available": False, "error": exc.message}
+                execution_logs.append(f"Flagsmith native refresh failed: {exc.message}")
 
         return {
             "synthetic_test_traffic": True,
+            "scenario": scenario,
+            "seed": seed,
+            "start_index": start_index,
             "batch_id": batch_id,
             "experiment_id": str(experiment.id),
             "flag_key": flag.key,
             "environment_name": env_name,
             "identities_evaluated": exposures_recorded,
+            "deduplicated_skipped": deduplicated_skipped,
+            "observed_flagsmith_assignments": observed_assignments,
             "conversions_recorded": conversions_recorded,
             "guardrail_errors_recorded": guardrail_errors_recorded,
+            "execution_logs": execution_logs,
             "flagsmith_native_refresh": native_refresh,
             "flagsmith_native_results": native_results,
         }

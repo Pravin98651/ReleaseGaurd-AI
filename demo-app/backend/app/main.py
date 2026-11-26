@@ -104,6 +104,7 @@ def create_app(
         app_cfg: ConfigDep,
         user_id: Annotated[str, Query(min_length=1, max_length=128)],
         environment_name: Annotated[str | None, Query(max_length=64)] = None,
+        session_key: Annotated[str | None, Query(max_length=128)] = None,
         plan: Annotated[str | None, Query(max_length=64)] = None,
         user_type: Annotated[str | None, Query(max_length=64)] = None,
         app_version: Annotated[str | None, Query(max_length=32)] = None,
@@ -132,6 +133,7 @@ def create_app(
             user_id=user_id,
             variation_key=eval_res.variation_key,
             environment_name=env,
+            session_key=session_key or f"browser_{user_id}",
             properties={
                 "evaluation_source": eval_res.evaluation_source,
                 "checkout_version": eval_res.checkout_version,

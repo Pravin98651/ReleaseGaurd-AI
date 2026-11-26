@@ -12,7 +12,11 @@ from app.agents.specialists.experiment_agent import canonicalize_primary_metric
 from app.agents.tools.context import ToolExecutionContext
 from app.analytics.bayesian import analyze_experiment_events
 from app.analytics.incidents import investigate_incident
-from app.analytics.recommendations import evaluate_recommendation
+from app.analytics.recommendations import (
+    evaluate_experiment_readiness,
+    evaluate_recommendation,
+    map_flagsmith_native_results,
+)
 from app.core.config import get_settings
 from app.core.database import utcnow
 from app.integrations.flagsmith_client import FlagsmithAPIError
@@ -402,6 +406,13 @@ async def handle_compute_bayesian_experiment_analysis(
         merged_thresholds["min_exposures"] = cfg.BAYESIAN_MIN_EXPOSURES
 
     events = await load_experiment_events_for_experiment(ctx, exp)
+    g_metrics = list(exp.guardrail_metrics or [])
+    err_metric = next(
+        (m for m in g_metrics if m in ("payment_failed", "error_rate")), "payment_failed"
+    )
+    aband_metric = next(
+        (m for m in g_metrics if m in ("checkout_abandoned",)), "checkout_abandoned"
+    )
     result = analyze_experiment_events(
         events,
         experiment_id=str(exp.id),
@@ -409,12 +420,15 @@ async def handle_compute_bayesian_experiment_analysis(
         control_variation=exp.control_variation,
         treatment_variation=exp.treatment_variation,
         primary_metric=exp.primary_metric,
+        error_metric=err_metric,
+        abandonment_metric=aband_metric,
         variation_map=build_variation_map(exp),
         mc_samples=args.mc_samples or cfg.BAYESIAN_MC_SAMPLES,
         seed=cfg.BAYESIAN_MC_SEED,
         thresholds=merged_thresholds,
     )
     analysis_dict = result.model_dump(mode="json")
+    native_res: dict[str, Any] | None = None
     if exp.flagsmith_experiment_id and exp.environment_key:
         try:
             client = await ctx.get_flagsmith_client()
@@ -424,7 +438,22 @@ async def handle_compute_bayesian_experiment_analysis(
             analysis_dict["flagsmith_native_results"] = native_res
             analysis_dict["flagsmith_experiment_id"] = exp.flagsmith_experiment_id
         except (FlagsmithAPIError, ValueError):
-            analysis_dict["flagsmith_native_results"] = {"available": False}
+            native_res = {"available": False}
+            analysis_dict["flagsmith_native_results"] = native_res
+
+    native_summary = map_flagsmith_native_results(native_res)
+    latest_event_at = events[-1].occurred_at if events else None
+    readiness = evaluate_experiment_readiness(
+        analysis=result,
+        experiment_status=exp.status.value,
+        analytics_mode=exp.analytics_mode.value,
+        flagsmith_experiment_id=exp.flagsmith_experiment_id,
+        started_at=exp.started_at,
+        latest_event_at=latest_event_at,
+        native_summary=native_summary,
+    )
+    analysis_dict["flagsmith_native_summary"] = native_summary
+    analysis_dict["readiness"] = readiness.model_dump(mode="json")
     exp.latest_bayesian_result = analysis_dict
     await ctx.session.commit()
     await ctx.session.refresh(exp)

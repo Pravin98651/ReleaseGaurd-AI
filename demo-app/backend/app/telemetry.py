@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -52,6 +53,20 @@ def utc_iso_now(dt: datetime | None = None) -> str:
     return target.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def build_deterministic_event_id(
+    *,
+    flag_key: str,
+    event_type: str,
+    user_id: str,
+    session_key: str | None = None,
+    suffix: str | None = None,
+) -> str:
+    """Create a stable idempotency event_id so refreshes/retries never double-count."""
+    basis = f"{flag_key}|{event_type}|{user_id}|{session_key or 'default'}|{suffix or ''}"
+    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
+    return f"evt_{digest}"
+
+
 class TelemetryEmitter:
     """Buffers and dispatches demo checkout events to /api/v1/events/ingest."""
 
@@ -81,21 +96,37 @@ class TelemetryEmitter:
         numeric_value: float | None = None,
         properties: dict[str, Any] | None = None,
         occurred_at: datetime | None = None,
+        event_id: str | None = None,
+        flag_key: str | None = None,
     ) -> dict[str, Any]:
         """Construct a canonical ReleaseGuard /api/v1/events/ingest event dict."""
         if event_type not in ALLOWED_EVENT_TYPES:
             raise ValueError(f"Unsupported event_type: {event_type}")
 
+        resolved_flag = flag_key or self._settings.CHECKOUT_FLAG_KEY
+        resolved_event_id = event_id
+        if resolved_event_id is None and event_type == "feature_variation_assigned" and session_key:
+            # Repeated page refreshes in the same session share one exposure idempotency key.
+            resolved_event_id = build_deterministic_event_id(
+                flag_key=resolved_flag,
+                event_type=event_type,
+                user_id=user_id,
+                session_key=session_key,
+            )
+
+        props = dict(properties or {})
+        props.setdefault("source", "novashop_demo")
+
         return {
-            "event_id": f"evt_{uuid4().hex}",
-            "flag_key": self._settings.CHECKOUT_FLAG_KEY,
+            "event_id": resolved_event_id or f"evt_{uuid4().hex}",
+            "flag_key": resolved_flag,
             "environment_name": environment_name or self._settings.FLAGSMITH_ENVIRONMENT_NAME,
             "variation_key": variation_key,
             "event_type": event_type,
             "user_identifier": pseudonymize_user_id(user_id, self._settings.PSEUDONYM_SALT),
             "session_key": session_key,
             "numeric_value": round(numeric_value, 2) if numeric_value is not None else None,
-            "properties": properties or {},
+            "properties": props,
             "occurred_at": utc_iso_now(occurred_at),
         }
 
@@ -129,28 +160,34 @@ class TelemetryEmitter:
             delivery_status: Literal["delivered", "offline", "error"] = "delivered"
             delivery_detail: str | None = None
 
-            try:
-                response = await self._client.post(
-                    ingest_url,
-                    json={"events": batch},
-                    headers=headers,
-                )
-                if 200 <= response.status_code < 300:
-                    payload = response.json() if response.content else {}
-                    accepted_total += int(payload.get("accepted", len(batch)))
-                    deduplicated_total += int(payload.get("deduplicated", 0))
-                    delivery_detail = f"HTTP {response.status_code}"
-                else:
-                    failed_batches += 1
+            for attempt in range(3):
+                try:
+                    response = await self._client.post(
+                        ingest_url,
+                        json={"events": batch},
+                        headers=headers,
+                    )
+                    if 200 <= response.status_code < 300:
+                        payload = response.json() if response.content else {}
+                        accepted_total += int(payload.get("accepted", len(batch)))
+                        deduplicated_total += int(payload.get("deduplicated", 0))
+                        delivery_status = "delivered"
+                        delivery_detail = f"HTTP {response.status_code}"
+                        break
                     delivery_status = "error"
                     delivery_detail = f"HTTP {response.status_code}: {response.text[:160]}"
-                    last_error = delivery_detail
-            except httpx.HTTPError as exc:
+                    if response.status_code < 500 and response.status_code != 429:
+                        break
+                except httpx.HTTPError as exc:
+                    delivery_status = "offline"
+                    delivery_detail = f"ReleaseGuard unreachable: {exc}"
+                if attempt < 2:
+                    await asyncio.sleep(0.15 * (attempt + 1))
+
+            if delivery_status != "delivered":
                 failed_batches += 1
-                delivery_status = "offline"
-                delivery_detail = f"ReleaseGuard unreachable: {exc}"
                 last_error = delivery_detail
-                logger.debug("Telemetry delivery skipped (%s)", exc)
+                logger.debug("Telemetry delivery failed (%s)", delivery_detail)
 
             for item in batch:
                 self._recent.appendleft(
