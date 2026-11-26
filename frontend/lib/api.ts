@@ -2264,3 +2264,237 @@ export async function queryOrganizationIntelligence(
   });
   return data;
 }
+
+// Phase 8: Developer Productivity & Benchmarks
+export type BenchmarkWorkflowType =
+  | "pr_review"
+  | "flag_setup"
+  | "experiment_setup"
+  | "release_decision"
+  | "complete_release";
+
+export type BenchmarkEvidenceClassification =
+  | "VERIFIED_MEASURED"
+  | "ESTIMATED"
+  | "SIMULATED"
+  | "INCOMPLETE";
+
+export interface BenchmarkStageRecord {
+  id: string;
+  stage_order: number;
+  stage_key: string;
+  stage_name: string;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_seconds: number;
+  active_developer_seconds: number;
+  unattended_execution_seconds: number;
+  api_call_count: number;
+  agent_call_count: number;
+  human_intervention_seconds: number;
+  retry_count: number;
+  failure_count: number;
+  success: boolean;
+  evidence_classification: BenchmarkEvidenceClassification;
+  manual_baseline_seconds: number | null;
+  details: Record<string, unknown>;
+}
+
+export interface BenchmarkImpactMetrics {
+  automated_duration_seconds: number;
+  manual_baseline_seconds: number | null;
+  time_saved_seconds: number | null;
+  pct_saved: number | null;
+  active_developer_seconds: number;
+  unattended_execution_seconds: number;
+  active_developer_time_saved_seconds: number | null;
+  automation_coverage_pct: number;
+  baseline_omitted_reason?: string;
+}
+
+export interface BenchmarkRunRecord {
+  id: string;
+  benchmark_id: string;
+  workflow_type: BenchmarkWorkflowType;
+  execution_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  total_duration_seconds: number;
+  active_developer_seconds: number;
+  unattended_execution_seconds: number;
+  api_call_count: number;
+  agent_call_count: number;
+  human_intervention_seconds: number;
+  human_intervention_count: number;
+  approval_latency_seconds: number | null;
+  retry_count: number;
+  failure_count: number;
+  success: boolean;
+  environment: string;
+  scenario: string;
+  evidence_classification: BenchmarkEvidenceClassification;
+  manual_baseline_seconds: number | null;
+  manual_baseline_source: string | null;
+  impact_metrics: BenchmarkImpactMetrics;
+  metadata_json: Record<string, unknown>;
+  created_at: string | null;
+  stages: BenchmarkStageRecord[];
+}
+
+export interface BenchmarkDurationStats {
+  mean: number | null;
+  median: number | null;
+  p95: number | null;
+  min: number | null;
+  max: number | null;
+}
+
+export interface BenchmarkBaselineComparison {
+  runs_with_baseline: number;
+  mean_manual_baseline_seconds: number;
+  mean_automated_seconds: number;
+  mean_time_saved_seconds: number;
+  pct_saved: number | null;
+}
+
+export interface BenchmarkGroupMetrics {
+  total_runs: number;
+  successful_runs: number;
+  failed_runs: number;
+  completion_rate: number;
+  failure_rate: number;
+  retry_rate: number;
+  total_retries: number;
+  total_failures: number;
+  human_intervention_frequency: number;
+  mean_human_intervention_seconds: number;
+  mean_approval_latency_seconds: number | null;
+  automation_coverage_pct: number;
+  mean_active_developer_seconds: number;
+  mean_unattended_execution_seconds: number;
+  duration_stats: BenchmarkDurationStats;
+  baseline_comparison: BenchmarkBaselineComparison | null;
+}
+
+export interface BenchmarkStageComparisonItem {
+  stage_key: string;
+  stage_name: string;
+  sample_count: number;
+  mean_duration_seconds: number;
+  median_duration_seconds: number | null;
+  p95_duration_seconds: number | null;
+  manual_baseline_seconds: number | null;
+  time_saved_seconds: number | null;
+  api_calls: number;
+  agent_calls: number;
+  retries: number;
+  failures: number;
+}
+
+export interface ManualBaselineStageSpec {
+  stage_key: string;
+  stage_name: string;
+  manual_baseline_seconds: number;
+  rationale: string;
+}
+
+export interface ManualBaselineSpec {
+  workflow_type: BenchmarkWorkflowType;
+  label: string;
+  manual_baseline_seconds: number;
+  manual_range_seconds: [number, number] | null;
+  manual_baseline_source: string;
+  rationale: string;
+  evidence_classification: BenchmarkEvidenceClassification;
+  stages: ManualBaselineStageSpec[];
+}
+
+export interface BenchmarkSummaryResponse {
+  overall: BenchmarkGroupMetrics;
+  evidence_classifications_present: BenchmarkEvidenceClassification[];
+  mixed_evidence_warning: string | null;
+  by_evidence_classification: Record<string, BenchmarkGroupMetrics>;
+  by_workflow_type: Record<string, BenchmarkGroupMetrics>;
+  stage_comparison: BenchmarkStageComparisonItem[];
+  manual_baselines: ManualBaselineSpec[];
+  filters?: {
+    workflow_type: string | null;
+    environment: string | null;
+    evidence_classification: string | null;
+    limit: number;
+  };
+}
+
+export interface BenchmarkRunsResponse {
+  runs: BenchmarkRunRecord[];
+  count: number;
+  limit: number;
+  offset: number;
+}
+
+export interface TriggerBenchmarkRequest {
+  workflow_type: BenchmarkWorkflowType;
+  environment: "development" | "staging";
+  scenario?: string;
+  require_live?: boolean;
+  human_intervention_seconds?: number;
+  include_baseline?: boolean;
+}
+
+export async function getBenchmarkSummary(params?: {
+  workflow_type?: BenchmarkWorkflowType;
+  environment?: string;
+  evidence_classification?: BenchmarkEvidenceClassification;
+  limit?: number;
+}): Promise<BenchmarkSummaryResponse> {
+  const qs = buildQuery(params);
+  const { data } = await requestJson<BenchmarkSummaryResponse>(`/api/v1/benchmarks/summary${qs}`);
+  return data;
+}
+
+export async function getBenchmarkBaselines(): Promise<{ baselines: ManualBaselineSpec[] }> {
+  const { data } = await requestJson<{ baselines: ManualBaselineSpec[] }>(
+    "/api/v1/benchmarks/baselines"
+  );
+  return data;
+}
+
+export async function listBenchmarkRuns(params?: {
+  workflow_type?: BenchmarkWorkflowType;
+  environment?: string;
+  evidence_classification?: BenchmarkEvidenceClassification;
+  success?: boolean;
+  limit?: number;
+  offset?: number;
+}): Promise<BenchmarkRunsResponse> {
+  const qs = buildQuery(params);
+  const { data } = await requestJson<BenchmarkRunsResponse>(`/api/v1/benchmarks/runs${qs}`);
+  return data;
+}
+
+export async function getBenchmarkRunDetail(
+  benchmarkId: string
+): Promise<{ run: BenchmarkRunRecord }> {
+  const { data } = await requestJson<{ run: BenchmarkRunRecord }>(
+    `/api/v1/benchmarks/runs/${encodeURIComponent(benchmarkId)}`
+  );
+  return data;
+}
+
+export async function triggerBenchmarkRun(
+  body: TriggerBenchmarkRequest
+): Promise<{ run: BenchmarkRunRecord }> {
+  const env = (body.environment || "").trim().toLowerCase();
+  if (env === "production" || env === "prod") {
+    throw new ApiError({
+      status: 400,
+      code: "PRODUCTION_BENCHMARK_BLOCKED",
+      message: "Benchmarks are strictly blocked in production. Use development or staging.",
+    });
+  }
+  const { data } = await requestJson<{ run: BenchmarkRunRecord }>("/api/v1/benchmarks/run", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+  return data;
+}

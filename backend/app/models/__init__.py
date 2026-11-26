@@ -2,6 +2,12 @@
 
 from app.core.database import Base
 from app.models.agents import AgentSession, AgentTask, LangGraphCheckpoint
+from app.models.benchmarks import (
+    BenchmarkEvidenceClassification,
+    BenchmarkRun,
+    BenchmarkStage,
+    BenchmarkWorkflowType,
+)
 from app.models.command_center import (
     AgentDecision,
     AgentExecution,
@@ -184,6 +190,10 @@ __all__ = [
     "AuditLog",
     "AuditStatus",
     "Base",
+    "BenchmarkEvidenceClassification",
+    "BenchmarkRun",
+    "BenchmarkStage",
+    "BenchmarkWorkflowType",
     "CodeChange",
     "CodeChangeStatus",
     "CodeChangeType",

@@ -236,16 +236,17 @@ sequenceDiagram
     Edge-->>Gate: Live state confirmed and AuditLog recorded
 ```
 
-### Measured Developer Time Savings (`task-3766`)
+### Developer Productivity & Time-Savings Benchmarks
 
-Measured end-to-end live timings against Flagsmith Cloud Project `#56055` compared with estimated manual engineering baselines (full breakdown in [developer-time-savings.md](docs/flagsmith/developer-time-savings.md)):
+ReleaseGuard AI includes a persistent benchmark suite (`/api/v1/benchmarks/*`, `/metrics`, and `backend/scripts/run_benchmark.py`) that strictly separates **Verified Measured** automated runs from **Estimated** manual engineering baselines and **Simulated** local runs (full methodology, trials, and limitations in [developer-time-savings.md](docs/flagsmith/developer-time-savings.md)):
 
-| Automated Release Engineering Workflow | Automated (Measured) | Manual Baseline (Est.) | Time Saved |
-| :--- | :---: | :---: | :---: |
-| Provision `10` governed flags + MV splits + `3` targeting segments + `5` dev switches | `40.84 s` | ~25–35 min | ~98% |
-| Create & start `4` multivariate Flagsmith experiments + `experiment-metrics/` | `40.82 s` | ~20–30 min | ~98% |
-| Run Edge cohort + Flagsmith results refresh + `50,000`-sample Bayesian check | `6.68 s` | ~15–20 min | ~99% |
-| **Total End-to-End Multi-Experiment Pipeline** | **`89.63 s` (~1.5 min)** | **~60–85 min** | **~97%** |
+| Workflow / Measurement | Evidence Class | Automated Timing | Manual Baseline (`ESTIMATED`) | Notes |
+| :--- | :---: | :---: | :---: | :--- |
+| **Workflow B (`flag_setup`, 3 live trials in `development`)** | `VERIFIED_MEASURED` | `mean 5.018 s` (`p50 5.0145 s`, `p95 5.1057 s`) | `15–25 min` (`1200 s` midpoint) | Live Flagsmith Project `#56055` MV flag + targeting check + auto-cleanup (`8` API calls, `0.0 s` active dev time) |
+| **Historical `task-3766` Multi-Experiment Snapshot (`n=1`)** | `VERIFIED_MEASURED` + `SIMULATED` cohort | `89.63 s` (`40.84 s` + `40.82 s` + `6.68 s`) | `35–60 min` (`2700 s` midpoint for E2E) | Single-run snapshot; stage 3 includes a `50`-identity synthetic traffic cohort |
+
+- **Active Dev vs. Unattended Time**: Unattended API provisioning records `active_developer_seconds = 0.0 s`; workflows with `PolicyCategory.C` human approval gates track `human_intervention_seconds` and `approval_latency_seconds` separately.
+- **No Fabricated Savings**: When a manual baseline is omitted (`--no-baseline`), `pct_saved` and `time_saved_seconds` are omitted rather than estimated. Production environments are strictly blocked.
 
 ---
 

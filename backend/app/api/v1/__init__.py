@@ -7,6 +7,7 @@ from app.api.v1.agent_executions import agent_executions_router
 from app.api.v1.approvals import approvals_router
 from app.api.v1.audit import audit_router
 from app.api.v1.auth import auth_router
+from app.api.v1.benchmarks import benchmarks_router
 from app.api.v1.dx_integration import dx_router
 from app.api.v1.events import events_router
 from app.api.v1.experiments import experiments_router
@@ -33,6 +34,7 @@ api_v1_router = APIRouter(prefix="/api/v1")
 api_v1_router.include_router(auth_router)
 api_v1_router.include_router(dashboard_router)
 api_v1_router.include_router(metrics_router)
+api_v1_router.include_router(benchmarks_router)
 api_v1_router.include_router(settings_router)
 api_v1_router.include_router(integrations_router)
 api_v1_router.include_router(repositories_router)

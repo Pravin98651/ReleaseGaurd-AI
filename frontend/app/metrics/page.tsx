@@ -11,9 +11,22 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Download, RefreshCw, BookOpen, Info } from "lucide-react";
+import {
+  Download,
+  RefreshCw,
+  BookOpen,
+  Info,
+  Play,
+  AlertTriangle,
+  Clock,
+  ShieldCheck,
+  ChevronDown,
+  ChevronRight,
+  Gauge,
+} from "lucide-react";
 import {
   getAgentMetrics,
+  getBenchmarkSummary,
   getErrorMessage,
   getEventMetrics,
   getExperimentMetrics,
@@ -22,6 +35,13 @@ import {
   getMetricsOverview,
   getPrMetrics,
   getReleaseMetrics,
+  listBenchmarkRuns,
+  triggerBenchmarkRun,
+  type BenchmarkEvidenceClassification,
+  type BenchmarkGroupMetrics,
+  type BenchmarkRunRecord,
+  type BenchmarkSummaryResponse,
+  type BenchmarkWorkflowType,
   type DashboardQueryFilters,
 } from "@/lib/api";
 import type { ExperimentPerformancePoint, TimeRangePreset } from "@/types/releaseguard";
@@ -36,6 +56,7 @@ import {
 import { RecommendationBadge, StatusBadge, EnvironmentBadge } from "@/components/StatusBadges";
 
 type MetricsTab =
+  | "benchmarks"
   | "releases"
   | "pull_requests"
   | "feature_flags"
@@ -43,6 +64,70 @@ type MetricsTab =
   | "agents"
   | "events"
   | "definitions";
+
+const WORKFLOW_LABELS: Record<BenchmarkWorkflowType, string> = {
+  pr_review: "Workflow A: PR Review & Risk Audit",
+  flag_setup: "Workflow B: Feature Flag Setup",
+  experiment_setup: "Workflow C: Experiment Setup",
+  release_decision: "Workflow D: Release Decision",
+  complete_release: "Workflow E: Complete Release",
+};
+
+const EVIDENCE_META: Record<
+  BenchmarkEvidenceClassification,
+  { label: string; tone: string; description: string }
+> = {
+  VERIFIED_MEASURED: {
+    label: "VERIFIED_MEASURED",
+    tone: "border-emerald-500/35 bg-emerald-500/10 text-emerald-300",
+    description: "Live API/execution with monotonic wall-clock timing",
+  },
+  ESTIMATED: {
+    label: "ESTIMATED",
+    tone: "border-sky-500/35 bg-sky-500/10 text-sky-300",
+    description: "Documented manual engineering baseline or estimate",
+  },
+  SIMULATED: {
+    label: "SIMULATED",
+    tone: "border-amber-500/35 bg-amber-500/10 text-amber-200",
+    description: "Non-live local/simulated harness execution",
+  },
+  INCOMPLETE: {
+    label: "INCOMPLETE",
+    tone: "border-slate-600/60 bg-slate-800/80 text-slate-300",
+    description: "Partial or aborted run with missing stages/baseline",
+  },
+};
+
+function EvidenceBadge({ classification }: { classification: BenchmarkEvidenceClassification | string }) {
+  const meta =
+    EVIDENCE_META[classification as BenchmarkEvidenceClassification] ?? {
+      label: String(classification || "UNKNOWN"),
+      tone: "border-slate-700 bg-slate-800/80 text-slate-300",
+      description: "Unclassified evidence",
+    };
+  return (
+    <span
+      title={meta.description}
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] font-semibold tracking-tight ${meta.tone}`}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-current opacity-85" />
+      {meta.label}
+    </span>
+  );
+}
+
+function formatDurationSeconds(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || Number.isNaN(seconds)) {
+    return "Unavailable";
+  }
+  if (seconds >= 60) {
+    const mins = Math.floor(seconds / 60);
+    const rem = seconds % 60;
+    return `${mins}m ${rem.toFixed(1)}s`;
+  }
+  return `${seconds.toFixed(2)}s`;
+}
 
 const emptySubscribe = () => () => {};
 function useIsHydrated(): boolean {
@@ -77,7 +162,7 @@ function UnavailableValue({ reason }: { reason: string }) {
 
 export default function MetricsPage() {
   const hydrated = useIsHydrated();
-  const [tab, setTab] = useState<MetricsTab>("releases");
+  const [tab, setTab] = useState<MetricsTab>("benchmarks");
   const [range, setRange] = useState<TimeRangePreset>("30d");
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
@@ -97,6 +182,27 @@ export default function MetricsPage() {
   const [expData, setExpData] = useState<Record<string, unknown> | null>(null);
   const [agentData, setAgentData] = useState<Record<string, unknown> | null>(null);
   const [eventData, setEventData] = useState<Record<string, unknown> | null>(null);
+
+  // Developer Productivity & Benchmark state
+  const [benchWorkflowFilter, setBenchWorkflowFilter] = useState<BenchmarkWorkflowType | "all">("all");
+  const [benchEnvFilter, setBenchEnvFilter] = useState<"all" | "development" | "staging">("all");
+  const [benchEvidenceFilter, setBenchEvidenceFilter] = useState<
+    BenchmarkEvidenceClassification | "all"
+  >("all");
+  const [benchSummary, setBenchSummary] = useState<BenchmarkSummaryResponse | null>(null);
+  const [benchRuns, setBenchRuns] = useState<BenchmarkRunRecord[]>([]);
+  const [benchLoading, setBenchLoading] = useState(false);
+  const [benchError, setBenchError] = useState<string | null>(null);
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+
+  // Run Benchmark trigger form state (strictly development / staging only)
+  const [triggerWorkflow, setTriggerWorkflow] = useState<BenchmarkWorkflowType>("flag_setup");
+  const [triggerEnv, setTriggerEnv] = useState<"development" | "staging">("development");
+  const [triggerScenario, setTriggerScenario] = useState("default");
+  const [triggerRequireLive, setTriggerRequireLive] = useState(false);
+  const [triggerIncludeBaseline, setTriggerIncludeBaseline] = useState(true);
+  const [triggerRunning, setTriggerRunning] = useState(false);
+  const [triggerResult, setTriggerResult] = useState<BenchmarkRunRecord | null>(null);
 
   const queryFilters: DashboardQueryFilters = useMemo(
     () => ({
@@ -139,12 +245,70 @@ export default function MetricsPage() {
     }
   }, [queryFilters]);
 
+  const loadBenchmarks = useCallback(async () => {
+    setBenchLoading(true);
+    setBenchError(null);
+    try {
+      const filters = {
+        workflow_type: benchWorkflowFilter !== "all" ? benchWorkflowFilter : undefined,
+        environment: benchEnvFilter !== "all" ? benchEnvFilter : undefined,
+        evidence_classification:
+          benchEvidenceFilter !== "all" ? benchEvidenceFilter : undefined,
+      };
+      const [summaryRes, runsRes] = await Promise.all([
+        getBenchmarkSummary({ ...filters, limit: 200 }),
+        listBenchmarkRuns({ ...filters, limit: 50, offset: 0 }),
+      ]);
+      setBenchSummary(summaryRes);
+      setBenchRuns(runsRes.runs ?? []);
+    } catch (err) {
+      setBenchError(getErrorMessage(err));
+    } finally {
+      setBenchLoading(false);
+    }
+  }, [benchWorkflowFilter, benchEnvFilter, benchEvidenceFilter]);
+
+  const handleTriggerBenchmark = useCallback(async () => {
+    setTriggerRunning(true);
+    setBenchError(null);
+    setTriggerResult(null);
+    try {
+      const res = await triggerBenchmarkRun({
+        workflow_type: triggerWorkflow,
+        environment: triggerEnv,
+        scenario: triggerScenario.trim() || "default",
+        require_live: triggerRequireLive,
+        include_baseline: triggerIncludeBaseline,
+      });
+      setTriggerResult(res.run);
+      await loadBenchmarks();
+    } catch (err) {
+      setBenchError(getErrorMessage(err));
+    } finally {
+      setTriggerRunning(false);
+    }
+  }, [
+    triggerWorkflow,
+    triggerEnv,
+    triggerScenario,
+    triggerRequireLive,
+    triggerIncludeBaseline,
+    loadBenchmarks,
+  ]);
+
   useEffect(() => {
     const t = setTimeout(() => {
       void loadAll();
     }, 0);
     return () => clearTimeout(t);
   }, [loadAll]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      void loadBenchmarks();
+    }, 0);
+    return () => clearTimeout(t);
+  }, [loadBenchmarks]);
 
   const filterOpts = (overview?.filter_options as Record<string, Array<Record<string, string>>>) ?? {};
   const definitions = (overview?.metric_definitions as Array<Record<string, unknown>>) ?? [];
@@ -157,7 +321,19 @@ export default function MetricsPage() {
   const experiments = (expData?.experiments as ExperimentPerformancePoint[]) ?? [];
 
   const exportSection: "releases" | "pull_requests" | "feature_flags" | "experiments" | "agents" | "events" =
-    tab === "definitions" ? "releases" : tab;
+    tab === "definitions" || tab === "benchmarks" ? "releases" : tab;
+
+  const benchOverall = benchSummary?.overall;
+  const benchBaselineComp = benchOverall?.baseline_comparison ?? null;
+  const benchStageChartData = useMemo(
+    () =>
+      (benchSummary?.stage_comparison ?? []).map((st) => ({
+        stage: st.stage_name,
+        manual_seconds: st.manual_baseline_seconds ?? 0,
+        automated_seconds: st.mean_duration_seconds,
+      })),
+    [benchSummary]
+  );
 
   return (
     <div className="space-y-6">
@@ -175,7 +351,10 @@ export default function MetricsPage() {
             </a>
             <button
               type="button"
-              onClick={() => void loadAll()}
+              onClick={() => {
+                void loadAll();
+                void loadBenchmarks();
+              }}
               className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-400"
             >
               <RefreshCw className="h-3.5 w-3.5" />
@@ -326,6 +505,7 @@ export default function MetricsPage() {
       <div className="flex flex-wrap gap-2">
         {(
           [
+            ["benchmarks", "Productivity & Benchmarks"],
             ["releases", "Release Engineering"],
             ["pull_requests", "Pull Requests"],
             ["feature_flags", "Feature Flags"],
@@ -350,10 +530,670 @@ export default function MetricsPage() {
         ))}
       </div>
 
-      {loading && !overview ? (
+      {loading && !overview && tab !== "benchmarks" ? (
         <LoadingSkeleton rows={4} />
       ) : (
         <>
+          {tab === "benchmarks" && (
+            <div className="space-y-6">
+              <ErrorBanner error={benchError} onRetry={() => void loadBenchmarks()} />
+
+              {/* Evidence Classification Legend & Filters */}
+              <SectionCard
+                title="Developer Productivity & Benchmark Comparison"
+                subtitle="Monotonic wall-clock timings vs documented manual engineering baselines. Evidence categories are never merged silently."
+                actions={
+                  <div className="flex flex-wrap items-center gap-2">
+                    <select
+                      aria-label="Filter benchmark workflow"
+                      value={benchWorkflowFilter}
+                      onChange={(e) =>
+                        setBenchWorkflowFilter(e.target.value as BenchmarkWorkflowType | "all")
+                      }
+                      className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-200"
+                    >
+                      <option value="all">All Workflows (A–E)</option>
+                      {(Object.keys(WORKFLOW_LABELS) as BenchmarkWorkflowType[]).map((wf) => (
+                        <option key={wf} value={wf}>
+                          {WORKFLOW_LABELS[wf]}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      aria-label="Filter benchmark environment"
+                      value={benchEnvFilter}
+                      onChange={(e) =>
+                        setBenchEnvFilter(e.target.value as "all" | "development" | "staging")
+                      }
+                      className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-200"
+                    >
+                      <option value="all">Non-Prod Envs (All)</option>
+                      <option value="development">development</option>
+                      <option value="staging">staging</option>
+                    </select>
+                    <select
+                      aria-label="Filter evidence classification"
+                      value={benchEvidenceFilter}
+                      onChange={(e) =>
+                        setBenchEvidenceFilter(
+                          e.target.value as BenchmarkEvidenceClassification | "all"
+                        )
+                      }
+                      className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-200"
+                    >
+                      <option value="all">All Evidence Classes</option>
+                      <option value="VERIFIED_MEASURED">VERIFIED_MEASURED</option>
+                      <option value="ESTIMATED">ESTIMATED</option>
+                      <option value="SIMULATED">SIMULATED</option>
+                      <option value="INCOMPLETE">INCOMPLETE</option>
+                    </select>
+                  </div>
+                }
+              >
+                <div className="flex flex-wrap items-center gap-2 text-[11px]">
+                  <span className="font-semibold uppercase tracking-wider text-slate-400">
+                    Evidence Classes:
+                  </span>
+                  {(Object.keys(EVIDENCE_META) as BenchmarkEvidenceClassification[]).map((cls) => (
+                    <span key={cls} className="inline-flex items-center gap-1.5">
+                      <EvidenceBadge classification={cls} />
+                      <span className="text-slate-400">{EVIDENCE_META[cls].description}</span>
+                    </span>
+                  ))}
+                </div>
+
+                {benchSummary?.mixed_evidence_warning && (
+                  <div className="mt-4 flex items-start gap-2.5 rounded-lg border border-amber-500/35 bg-amber-500/10 px-3.5 py-2.5 text-xs text-amber-200">
+                    <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-300" />
+                    <div>
+                      <span className="font-semibold">Mixed Evidence Notice: </span>
+                      {benchSummary.mixed_evidence_warning}
+                    </div>
+                  </div>
+                )}
+              </SectionCard>
+
+              {/* Run Benchmark Trigger (development / staging ONLY) */}
+              <SectionCard
+                title="Run Non-Production Benchmark"
+                subtitle="Triggers a repeatable benchmark run with monotonic timing capture. Production is strictly blocked."
+                actions={
+                  <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-300">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    Non-Prod Only (dev / staging)
+                  </span>
+                }
+              >
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+                  <div>
+                    <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                      Workflow
+                    </label>
+                    <select
+                      aria-label="Trigger benchmark workflow"
+                      value={triggerWorkflow}
+                      onChange={(e) => setTriggerWorkflow(e.target.value as BenchmarkWorkflowType)}
+                      className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs text-slate-200"
+                    >
+                      {(Object.keys(WORKFLOW_LABELS) as BenchmarkWorkflowType[]).map((wf) => (
+                        <option key={wf} value={wf}>
+                          {WORKFLOW_LABELS[wf]}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                      Environment (production blocked)
+                    </label>
+                    <select
+                      aria-label="Trigger benchmark environment"
+                      value={triggerEnv}
+                      onChange={(e) =>
+                        setTriggerEnv(e.target.value as "development" | "staging")
+                      }
+                      className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs text-slate-200"
+                    >
+                      <option value="development">development</option>
+                      <option value="staging">staging</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-[11px] font-medium text-slate-400">
+                      Scenario Label
+                    </label>
+                    <input
+                      type="text"
+                      aria-label="Benchmark scenario"
+                      value={triggerScenario}
+                      onChange={(e) => setTriggerScenario(e.target.value)}
+                      placeholder="default"
+                      className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-2 text-xs text-slate-200"
+                    />
+                  </div>
+
+                  <div className="flex flex-col justify-end gap-2 pb-1 text-xs text-slate-300">
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={triggerRequireLive}
+                        onChange={(e) => setTriggerRequireLive(e.target.checked)}
+                        className="rounded border-slate-700 bg-slate-900"
+                      />
+                      Require live integrations
+                    </label>
+                    <label className="inline-flex items-center gap-2">
+                      <input
+                        type="checkbox"
+                        checked={triggerIncludeBaseline}
+                        onChange={(e) => setTriggerIncludeBaseline(e.target.checked)}
+                        className="rounded border-slate-700 bg-slate-900"
+                      />
+                      Include manual baseline
+                    </label>
+                  </div>
+
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      disabled={triggerRunning}
+                      onClick={() => void handleTriggerBenchmark()}
+                      className="inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-400 disabled:opacity-50"
+                    >
+                      <Play className="h-3.5 w-3.5" />
+                      {triggerRunning ? "Running Benchmark..." : "Run Benchmark"}
+                    </button>
+                  </div>
+                </div>
+
+                {triggerResult && (
+                  <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-xs">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-emerald-300">Completed:</span>
+                      <span className="font-mono text-slate-100">{triggerResult.benchmark_id}</span>
+                      <EvidenceBadge classification={triggerResult.evidence_classification} />
+                      <EnvironmentBadge environment={triggerResult.environment} />
+                      <StatusBadge status={triggerResult.success ? "success" : "failed"} />
+                    </div>
+                    <div className="font-mono text-slate-200">
+                      Duration: {formatDurationSeconds(triggerResult.total_duration_seconds)} · API
+                      calls: {triggerResult.api_call_count}
+                    </div>
+                  </div>
+                )}
+              </SectionCard>
+
+              {benchLoading && !benchSummary ? (
+                <LoadingSkeleton rows={4} />
+              ) : (
+                <>
+                  {/* KPI Summary Cards */}
+                  <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
+                    <MetricCard
+                      label="Manual vs Automated"
+                      value={
+                        benchBaselineComp
+                          ? `${formatDurationSeconds(benchBaselineComp.mean_manual_baseline_seconds)} → ${formatDurationSeconds(benchBaselineComp.mean_automated_seconds)}`
+                          : benchOverall?.duration_stats?.mean !== null &&
+                              benchOverall?.duration_stats?.mean !== undefined
+                            ? formatDurationSeconds(benchOverall.duration_stats.mean)
+                            : "Unavailable"
+                      }
+                      subtext={
+                        benchOverall?.duration_stats?.p95 !== null &&
+                        benchOverall?.duration_stats?.p95 !== undefined
+                          ? `Median ${formatDurationSeconds(benchOverall.duration_stats.median)} · p95 ${formatDurationSeconds(benchOverall.duration_stats.p95)}`
+                          : "No benchmark runs recorded yet"
+                      }
+                      icon={<Clock className="h-4 w-4" />}
+                    />
+                    <MetricCard
+                      label="Time Saved"
+                      value={
+                        benchBaselineComp && benchBaselineComp.pct_saved !== null
+                          ? `${formatDurationSeconds(benchBaselineComp.mean_time_saved_seconds)} (${benchBaselineComp.pct_saved}%)`
+                          : "Omitted"
+                      }
+                      subtext={
+                        benchBaselineComp
+                          ? `Across ${benchBaselineComp.runs_with_baseline} run(s) with documented baseline`
+                          : "No manual baseline attached (% saved not fabricated)"
+                      }
+                      tone={benchBaselineComp ? "emerald" : "default"}
+                    />
+                    <MetricCard
+                      label="Success vs Failed"
+                      value={`${benchOverall?.successful_runs ?? 0} / ${benchOverall?.failed_runs ?? 0}`}
+                      subtext={`Completion ${((benchOverall?.completion_rate ?? 0) * 100).toFixed(1)}% · Retry rate ${((benchOverall?.retry_rate ?? 0) * 100).toFixed(1)}%`}
+                      tone={
+                        (benchOverall?.failed_runs ?? 0) > 0 ? "amber" : "emerald"
+                      }
+                    />
+                    <MetricCard
+                      label="Automation Coverage"
+                      value={`${(benchOverall?.automation_coverage_pct ?? 0).toFixed(1)}%`}
+                      subtext="Unattended execution / total duration"
+                      tone="sky"
+                      icon={<Gauge className="h-4 w-4" />}
+                    />
+                    <MetricCard
+                      label="Human vs Unattended"
+                      value={`${formatDurationSeconds(benchOverall?.mean_active_developer_seconds ?? 0)} / ${formatDurationSeconds(benchOverall?.mean_unattended_execution_seconds ?? 0)}`}
+                      subtext={`Intervention freq ${((benchOverall?.human_intervention_frequency ?? 0) * 100).toFixed(1)}% · Approval ${formatDurationSeconds(benchOverall?.mean_approval_latency_seconds)}`}
+                      tone="indigo"
+                    />
+                  </div>
+
+                  {/* Unmixed Breakdown by Evidence Classification */}
+                  {benchSummary &&
+                    Object.keys(benchSummary.by_evidence_classification ?? {}).length > 0 && (
+                      <SectionCard
+                        title="Unmixed Metrics by Evidence Classification"
+                        subtitle="Each evidence class is aggregated independently so VERIFIED_MEASURED runs are never blended with ESTIMATED or SIMULATED runs."
+                      >
+                        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+                          {Object.entries(benchSummary.by_evidence_classification).map(
+                            ([cls, grp]: [string, BenchmarkGroupMetrics]) => (
+                              <div
+                                key={cls}
+                                className="rounded-lg border border-slate-800 bg-[#0d1119] p-3.5 text-xs space-y-2"
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <EvidenceBadge classification={cls} />
+                                  <span className="font-mono text-slate-400">
+                                    {grp.total_runs} run{grp.total_runs === 1 ? "" : "s"}
+                                  </span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-2 pt-1">
+                                  <div>
+                                    <div className="text-[10px] text-slate-400">Mean / p95</div>
+                                    <div className="font-mono font-semibold text-slate-100">
+                                      {formatDurationSeconds(grp.duration_stats.mean)} /{" "}
+                                      {formatDurationSeconds(grp.duration_stats.p95)}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="text-[10px] text-slate-400">Success / Fail</div>
+                                    <div className="font-mono font-semibold text-slate-100">
+                                      {grp.successful_runs} / {grp.failed_runs}
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="text-[10px] text-slate-400">Automation</div>
+                                    <div className="font-mono text-sky-300">
+                                      {grp.automation_coverage_pct.toFixed(1)}%
+                                    </div>
+                                  </div>
+                                  <div>
+                                    <div className="text-[10px] text-slate-400">Time Saved</div>
+                                    <div className="font-mono text-emerald-300">
+                                      {grp.baseline_comparison?.pct_saved !== null &&
+                                      grp.baseline_comparison?.pct_saved !== undefined
+                                        ? `${grp.baseline_comparison.pct_saved}%`
+                                        : "Omitted"}
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          )}
+                        </div>
+                      </SectionCard>
+                    )}
+
+                  {/* Stage-by-Stage Comparison Chart & Table */}
+                  <div className="grid gap-6 lg:grid-cols-2">
+                    <SectionCard
+                      title="Manual vs Automated Stage Duration (Seconds)"
+                      subtitle="Manual baseline (ESTIMATED) compared against mean automated stage duration"
+                    >
+                      {hydrated && benchStageChartData.length > 0 ? (
+                        <div className="h-64 w-full">
+                          <ResponsiveContainer width="100%" height="100%">
+                            <BarChart data={benchStageChartData}>
+                              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+                              <XAxis
+                                dataKey="stage"
+                                stroke="#94a3b8"
+                                tick={{ fontSize: 10 }}
+                                interval={0}
+                                angle={-15}
+                                textAnchor="end"
+                                height={50}
+                              />
+                              <YAxis stroke="#94a3b8" tick={{ fontSize: 11 }} />
+                              <Tooltip
+                                contentStyle={{
+                                  backgroundColor: "#0f172a",
+                                  borderColor: "#334155",
+                                  borderRadius: 8,
+                                }}
+                              />
+                              <Legend />
+                              <Bar
+                                dataKey="manual_seconds"
+                                name="Manual Baseline (ESTIMATED, s)"
+                                fill="#64748b"
+                                radius={[4, 4, 0, 0]}
+                              />
+                              <Bar
+                                dataKey="automated_seconds"
+                                name="Automated Mean (s)"
+                                fill="#10b981"
+                                radius={[4, 4, 0, 0]}
+                              />
+                            </BarChart>
+                          </ResponsiveContainer>
+                        </div>
+                      ) : (
+                        <EmptyState
+                          title="No stage timings yet"
+                          description="Trigger a non-production benchmark above to capture stage-by-stage comparisons."
+                        />
+                      )}
+                    </SectionCard>
+
+                    <SectionCard
+                      title="Human Intervention vs Unattended Execution by Workflow"
+                      subtitle="Active developer time vs unattended agent/API execution per workflow"
+                    >
+                      {Object.keys(benchSummary?.by_workflow_type ?? {}).length === 0 ? (
+                        <EmptyState
+                          title="No workflow benchmarks yet"
+                          description="Run any workflow (A–E) in development or staging to populate workflow comparisons."
+                        />
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="w-full text-left text-xs">
+                            <thead className="border-b border-slate-800 text-slate-400">
+                              <tr>
+                                <th className="py-2 pr-3">Workflow</th>
+                                <th className="py-2 pr-3">Runs (OK/Fail)</th>
+                                <th className="py-2 pr-3">Active Dev</th>
+                                <th className="py-2 pr-3">Unattended</th>
+                                <th className="py-2 pr-3">Coverage</th>
+                                <th className="py-2">p95</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-800/70">
+                              {Object.entries(benchSummary?.by_workflow_type ?? {}).map(
+                                ([wf, grp]) => (
+                                  <tr key={wf}>
+                                    <td className="py-2 pr-3 font-medium text-slate-100">
+                                      {WORKFLOW_LABELS[wf as BenchmarkWorkflowType] ?? wf}
+                                    </td>
+                                    <td className="py-2 pr-3 font-mono tabular-nums">
+                                      <span className="text-emerald-300">
+                                        {grp.successful_runs}
+                                      </span>{" "}
+                                      /{" "}
+                                      <span className="text-rose-300">{grp.failed_runs}</span>
+                                    </td>
+                                    <td className="py-2 pr-3 font-mono tabular-nums text-amber-200">
+                                      {formatDurationSeconds(grp.mean_active_developer_seconds)}
+                                    </td>
+                                    <td className="py-2 pr-3 font-mono tabular-nums text-sky-300">
+                                      {formatDurationSeconds(
+                                        grp.mean_unattended_execution_seconds
+                                      )}
+                                    </td>
+                                    <td className="py-2 pr-3 font-mono tabular-nums">
+                                      {grp.automation_coverage_pct.toFixed(1)}%
+                                    </td>
+                                    <td className="py-2 font-mono tabular-nums text-slate-300">
+                                      {formatDurationSeconds(grp.duration_stats.p95)}
+                                    </td>
+                                  </tr>
+                                )
+                              )}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </SectionCard>
+                  </div>
+
+                  {/* Stage-by-Stage Comparison Table */}
+                  <SectionCard
+                    title="Stage-by-Stage Comparison Table"
+                    subtitle="Monotonic stage durations (mean, median, p95), documented manual baselines, and API/agent/retry counts"
+                  >
+                    {(benchSummary?.stage_comparison ?? []).length === 0 ? (
+                      <EmptyState
+                        title="No stage comparison data"
+                        description="Run a benchmark to inspect per-stage latency and savings."
+                      />
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead className="border-b border-slate-800 text-slate-400">
+                            <tr>
+                              <th className="py-2 pr-3">Stage</th>
+                              <th className="py-2 pr-3">Samples</th>
+                              <th className="py-2 pr-3">Manual (ESTIMATED)</th>
+                              <th className="py-2 pr-3">Auto Mean</th>
+                              <th className="py-2 pr-3">Median / p95</th>
+                              <th className="py-2 pr-3">Time Saved</th>
+                              <th className="py-2 pr-3">API / Agent</th>
+                              <th className="py-2">Retries / Fails</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/70">
+                            {(benchSummary?.stage_comparison ?? []).map((st) => (
+                              <tr key={st.stage_key}>
+                                <td className="py-2 pr-3 font-medium text-slate-100">
+                                  {st.stage_name}
+                                  <div className="font-mono text-[10px] text-slate-400">
+                                    {st.stage_key}
+                                  </div>
+                                </td>
+                                <td className="py-2 pr-3 font-mono tabular-nums">
+                                  {st.sample_count}
+                                </td>
+                                <td className="py-2 pr-3 font-mono tabular-nums text-sky-300">
+                                  {formatDurationSeconds(st.manual_baseline_seconds)}
+                                </td>
+                                <td className="py-2 pr-3 font-mono tabular-nums text-emerald-300">
+                                  {formatDurationSeconds(st.mean_duration_seconds)}
+                                </td>
+                                <td className="py-2 pr-3 font-mono tabular-nums text-slate-300">
+                                  {formatDurationSeconds(st.median_duration_seconds)} /{" "}
+                                  {formatDurationSeconds(st.p95_duration_seconds)}
+                                </td>
+                                <td className="py-2 pr-3 font-mono tabular-nums text-emerald-300">
+                                  {formatDurationSeconds(st.time_saved_seconds)}
+                                </td>
+                                <td className="py-2 pr-3 font-mono tabular-nums text-slate-300">
+                                  {st.api_calls} / {st.agent_calls}
+                                </td>
+                                <td className="py-2 font-mono tabular-nums text-slate-300">
+                                  {st.retries} / {st.failures}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </SectionCard>
+
+                  {/* Historical Benchmark Runs */}
+                  <SectionCard
+                    title="Historical Benchmark Runs"
+                    subtitle={`Persisted UTC benchmark runs (${benchRuns.length} shown, displayed in ${timezone})`}
+                  >
+                    {benchRuns.length === 0 ? (
+                      <EmptyState
+                        title="No historical benchmark runs"
+                        description="Click 'Run Benchmark' above or run backend/scripts/run_benchmark.py to record runs."
+                      />
+                    ) : (
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-xs">
+                          <thead className="border-b border-slate-800 text-slate-400">
+                            <tr>
+                              <th className="py-2 pr-2"></th>
+                              <th className="py-2 pr-3">Benchmark ID</th>
+                              <th className="py-2 pr-3">Workflow</th>
+                              <th className="py-2 pr-3">Env</th>
+                              <th className="py-2 pr-3">Evidence</th>
+                              <th className="py-2 pr-3">Status</th>
+                              <th className="py-2 pr-3">Duration</th>
+                              <th className="py-2 pr-3">Active / Unattended</th>
+                              <th className="py-2 pr-3">Time Saved</th>
+                              <th className="py-2">Started</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/70">
+                            {benchRuns.map((run) => {
+                              const isExpanded = expandedRunId === run.benchmark_id;
+                              const impact = run.impact_metrics;
+                              return (
+                                <React.Fragment key={run.benchmark_id}>
+                                  <tr
+                                    className="cursor-pointer hover:bg-slate-800/40"
+                                    onClick={() =>
+                                      setExpandedRunId(isExpanded ? null : run.benchmark_id)
+                                    }
+                                  >
+                                    <td className="py-2.5 pr-2 text-slate-400">
+                                      {isExpanded ? (
+                                        <ChevronDown className="h-3.5 w-3.5" />
+                                      ) : (
+                                        <ChevronRight className="h-3.5 w-3.5" />
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 pr-3 font-mono text-slate-100">
+                                      {run.benchmark_id}
+                                      <div className="text-[10px] text-slate-400">
+                                        {run.scenario}
+                                      </div>
+                                    </td>
+                                    <td className="py-2.5 pr-3 text-slate-200">
+                                      {run.workflow_type}
+                                    </td>
+                                    <td className="py-2.5 pr-3">
+                                      <EnvironmentBadge environment={run.environment} />
+                                    </td>
+                                    <td className="py-2.5 pr-3">
+                                      <EvidenceBadge classification={run.evidence_classification} />
+                                    </td>
+                                    <td className="py-2.5 pr-3">
+                                      <StatusBadge status={run.success ? "success" : "failed"} />
+                                    </td>
+                                    <td className="py-2.5 pr-3 font-mono tabular-nums text-slate-100">
+                                      {formatDurationSeconds(run.total_duration_seconds)}
+                                    </td>
+                                    <td className="py-2.5 pr-3 font-mono tabular-nums text-slate-300">
+                                      {formatDurationSeconds(run.active_developer_seconds)} /{" "}
+                                      {formatDurationSeconds(run.unattended_execution_seconds)}
+                                    </td>
+                                    <td className="py-2.5 pr-3 font-mono tabular-nums">
+                                      {impact?.pct_saved !== null &&
+                                      impact?.pct_saved !== undefined ? (
+                                        <span className="text-emerald-300">
+                                          {formatDurationSeconds(impact.time_saved_seconds)} (
+                                          {impact.pct_saved}%)
+                                        </span>
+                                      ) : (
+                                        <span className="text-slate-400">Omitted (no baseline)</span>
+                                      )}
+                                    </td>
+                                    <td className="py-2.5 font-mono text-slate-400">
+                                      {formatInTimezone(run.started_at, timezone)}
+                                    </td>
+                                  </tr>
+                                  {isExpanded && (
+                                    <tr className="bg-[#0d1119]">
+                                      <td colSpan={10} className="px-4 py-3">
+                                        <div className="space-y-2 text-[11px]">
+                                          <div className="flex flex-wrap gap-4 text-slate-400">
+                                            <span>API calls: {run.api_call_count}</span>
+                                            <span>Agent calls: {run.agent_call_count}</span>
+                                            <span>Retries: {run.retry_count}</span>
+                                            <span>Failures: {run.failure_count}</span>
+                                            <span>
+                                              Baseline source:{" "}
+                                              {run.manual_baseline_source ?? "None attached"}
+                                            </span>
+                                          </div>
+                                          {run.stages.length > 0 && (
+                                            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3 pt-1">
+                                              {run.stages.map((st) => (
+                                                <div
+                                                  key={st.id}
+                                                  className="rounded border border-slate-800 bg-[#111622] p-2.5"
+                                                >
+                                                  <div className="flex items-center justify-between gap-2 font-medium text-slate-200">
+                                                    <span>
+                                                      {st.stage_order}. {st.stage_name}
+                                                    </span>
+                                                    <EvidenceBadge
+                                                      classification={st.evidence_classification}
+                                                    />
+                                                  </div>
+                                                  <div className="mt-1 font-mono text-slate-400">
+                                                    Auto: {formatDurationSeconds(st.duration_seconds)}{" "}
+                                                    · Manual:{" "}
+                                                    {formatDurationSeconds(
+                                                      st.manual_baseline_seconds
+                                                    )}
+                                                  </div>
+                                                </div>
+                                              ))}
+                                            </div>
+                                          )}
+                                        </div>
+                                      </td>
+                                    </tr>
+                                  )}
+                                </React.Fragment>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </SectionCard>
+
+                  {/* Documented Manual Baselines & Rationales */}
+                  {(benchSummary?.manual_baselines ?? []).length > 0 && (
+                    <SectionCard
+                      title="Documented Manual Engineering Baselines"
+                      subtitle="Transparent per-workflow assumptions and rationales (all classified ESTIMATED)"
+                    >
+                      <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                        {(benchSummary?.manual_baselines ?? []).map((mb) => (
+                          <div
+                            key={mb.workflow_type}
+                            className="rounded-lg border border-slate-800 bg-[#0d1119] p-3.5 text-xs space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="font-semibold text-slate-100">{mb.label}</span>
+                              <EvidenceBadge classification={mb.evidence_classification} />
+                            </div>
+                            <div className="font-mono text-sky-300">
+                              Baseline: {formatDurationSeconds(mb.manual_baseline_seconds)}
+                              {mb.manual_range_seconds
+                                ? ` (range ${formatDurationSeconds(mb.manual_range_seconds[0])}–${formatDurationSeconds(mb.manual_range_seconds[1])})`
+                                : ""}
+                            </div>
+                            <p className="text-slate-400 leading-relaxed">{mb.rationale}</p>
+                            <div className="text-[10px] text-slate-500">
+                              Source: {mb.manual_baseline_source}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </SectionCard>
+                  )}
+                </>
+              )}
+            </div>
+          )}
+
           {tab === "releases" && (
             <div className="space-y-6">
               <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
