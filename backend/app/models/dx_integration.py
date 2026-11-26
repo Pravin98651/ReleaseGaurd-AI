@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     ForeignKey,
     Index,
@@ -39,7 +40,7 @@ class GitHubInstallation(Base):
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    installation_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    installation_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     account_login: Mapped[str] = mapped_column(String(120), nullable=False)
     account_type: Mapped[str] = mapped_column(String(32), nullable=False, default="Organization")
     repository_selection: Mapped[str] = mapped_column(String(32), nullable=False, default="selected")
@@ -74,7 +75,7 @@ class GitHubWebhookEvent(Base):
     delivery_id: Mapped[str] = mapped_column(String(128), nullable=False)
     event_type: Mapped[str] = mapped_column(String(80), nullable=False)
     action: Mapped[str | None] = mapped_column(String(80), nullable=True)
-    installation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    installation_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     repository_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("repositories.id", ondelete="SET NULL"), nullable=True
     )
@@ -114,7 +115,7 @@ class GitHubCheckRun(Base):
         Uuid(as_uuid=True), ForeignKey("pull_requests.id", ondelete="CASCADE"), nullable=False
     )
     commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
-    external_check_run_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    external_check_run_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     name: Mapped[str] = mapped_column(String(120), nullable=False, default="ReleaseGuard AI")
     status: Mapped[GitHubCheckStatus] = mapped_column(
         str_enum(GitHubCheckStatus, length=32), nullable=False, default=GitHubCheckStatus.QUEUED
@@ -150,7 +151,7 @@ class PullRequestAnalysisComment(Base):
         Uuid(as_uuid=True), ForeignKey("pull_requests.id", ondelete="CASCADE"), nullable=False
     )
     commit_sha: Mapped[str] = mapped_column(String(64), nullable=False)
-    external_comment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    external_comment_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     marker_id: Mapped[str] = mapped_column(
         String(128), nullable=False, default="<!-- releaseguard-ai:pr-summary -->"
     )

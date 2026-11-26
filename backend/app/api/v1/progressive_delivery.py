@@ -19,6 +19,9 @@ from app.api.deps import (
 from app.api.v1.errors import APIException
 from app.models import (
     ActorType,
+    Approval,
+    ApprovalStatus,
+    FeatureFlag,
     GuardrailEvaluation,
     ProgressiveRollout,
     ProgressiveRolloutEvent,
@@ -43,6 +46,7 @@ from app.schemas import (
     RolloutGuardrailOut,
     RolloutMetricSnapshotOut,
 )
+from app.services.policy_engine import PolicyEngine, is_production_environment
 from app.services.progressive_delivery import (
     ProgressiveDeliveryError,
     ProgressiveDeliveryService,
@@ -399,6 +403,59 @@ async def execute_rollout_rollback(
 ) -> RollbackOperationOut:
     rollout = await _load_rollout_or_404(session, rollout_id)
     flagsmith_client = await build_flagsmith_client(request.app, session)
+    flag = await session.get(FeatureFlag, rollout.feature_flag_id)
+    _, requires_approval = await PolicyEngine.evaluate_action(
+        session,
+        action_type="progressive_rollout_rollback",
+        environment_name=rollout.environment,
+        env_states=dict(flag.env_states or {}) if flag else None,
+        actor_type=ActorType.USER,
+        actor_id=str(operator.id),
+        resource_type="progressive_rollout",
+        resource_id=str(rollout.id),
+    )
+
+    approved_row: Approval | None = None
+    if is_production_environment(rollout.environment):
+        consumed_subq = select(RollbackOperation.approval_id).where(
+            RollbackOperation.approval_id.is_not(None)
+        )
+        env_norm = rollout.environment.strip().lower()
+        approved_row = (
+            await session.execute(
+                select(Approval)
+                .where(
+                    Approval.status == ApprovalStatus.EXECUTED,
+                    Approval.action_type.in_(
+                        [
+                            "progressive_rollout_rollback",
+                            "progressive_rollout.rollback",
+                            "flagsmith_rollback_flag",
+                            "flagsmith.rollback_flag",
+                        ]
+                    ),
+                    func.lower(Approval.environment_name) == env_norm,
+                    (
+                        (
+                            (Approval.target_resource_type == "progressive_rollout")
+                            & (Approval.target_resource_id == str(rollout.id))
+                        )
+                        | (
+                            (Approval.target_resource_type == "feature_flag")
+                            & (Approval.target_resource_id == str(rollout.feature_flag_id))
+                            & (Approval.created_at >= rollout.created_at)
+                        )
+                    ),
+                    ~Approval.id.in_(consumed_subq),
+                )
+                .order_by(Approval.executed_at.desc(), Approval.created_at.desc())
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        has_production_approval = approved_row is not None
+    else:
+        has_production_approval = not requires_approval
+
     try:
         op = await ProgressiveDeliveryService.execute_rollback(
             session,
@@ -406,10 +463,13 @@ async def execute_rollout_rollback(
             actor_id=operator.id,
             reason=body.reason or "Operator-triggered rollback",
             flagsmith_client=flagsmith_client,
-            has_production_approval=False,
+            has_production_approval=has_production_approval,
         )
     except ProgressiveDeliveryError as exc:
         _raise_pd_err(exc)
+    if approved_row is not None and op.approval_id is None:
+        op.approval_id = approved_row.id
+        await session.flush()
     await session.commit()
     return RollbackOperationOut.model_validate(op)
 

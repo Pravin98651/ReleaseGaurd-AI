@@ -355,6 +355,26 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
+def _normalize_flag_type(raw: Any) -> str:
+    """Coerce LLM-provided flag_type aliases (e.g. 'boolean') to FlagType enum strings."""
+    cleaned = str(raw or "").strip().upper()
+    if cleaned in {"MULTIVARIATE", "MV", "AB", "A/B", "EXPERIMENT", "MULTI"}:
+        return FlagType.MULTIVARIATE.value
+    return FlagType.STANDARD.value
+
+
+def _normalize_risk_severity(raw: Any) -> str:
+    """Coerce LLM-provided severity strings to valid RiskLevel enum values."""
+    cleaned = str(raw or "").strip().lower()
+    if cleaned in {"low", "medium", "high", "critical"}:
+        return cleaned
+    if cleaned in {"info", "minor"}:
+        return RiskLevel.LOW.value
+    if cleaned in {"severe", "blocker"}:
+        return RiskLevel.CRITICAL.value
+    return RiskLevel.MEDIUM.value
+
+
 def annotate_flag_opportunities_with_existing(
     flag_opportunities: list[dict[str, Any]],
     existing_flag_keys: set[str],
@@ -369,6 +389,7 @@ def annotate_flag_opportunities_with_existing(
         existing_match = normalized_existing.get(norm_key)
         already_exists = existing_match is not None
         item["suggested_flag_key"] = raw_key
+        item["flag_type"] = _normalize_flag_type(item.get("flag_type"))
         item["already_exists"] = already_exists
         item["existing_flag_key"] = existing_match
         item["dedup_action"] = "reuse_existing" if already_exists else "create_new"
@@ -485,18 +506,42 @@ async def analyze_pr_with_static_and_gemini(
                 parsed = json.loads(cleaned_json)
                 if isinstance(parsed, dict):
                     verified_confirmed: list[dict[str, Any]] = []
-                    extra_potential: list[dict[str, Any]] = list(parsed.get("potential_risks") or [])
+                    extra_potential: list[dict[str, Any]] = []
+                    for pr_item in parsed.get("potential_risks") or []:
+                        if not isinstance(pr_item, dict):
+                            continue
+                        extra_potential.append(
+                            {
+                                "title": str(pr_item.get("title") or "Potential risk"),
+                                "severity": _normalize_risk_severity(pr_item.get("severity")),
+                                "assumption": str(pr_item.get("assumption") or "Unverified runtime assumption."),
+                                "verification_needed": str(
+                                    pr_item.get("verification_needed") or "Verify in non-production."
+                                ),
+                            }
+                        )
                     for cr in parsed.get("confirmed_risks") or []:
                         if not isinstance(cr, dict):
                             continue
                         fp = str(cr.get("file_path") or "")
                         if not changed_files or fp in changed_files:
-                            verified_confirmed.append(cr)
+                            verified_confirmed.append(
+                                {
+                                    "title": str(cr.get("title") or "Confirmed risk"),
+                                    "severity": _normalize_risk_severity(cr.get("severity")),
+                                    "file_path": fp,
+                                    "line_range": str(cr.get("line_range") or "L1"),
+                                    "evidence": str(cr.get("evidence") or f"Observed in {fp}"),
+                                    "mitigation": str(
+                                        cr.get("mitigation") or "Guard behind a Flagsmith feature flag."
+                                    ),
+                                }
+                            )
                         else:
                             extra_potential.append(
                                 {
                                     "title": str(cr.get("title") or "Unverified risk citation"),
-                                    "severity": str(cr.get("severity") or "medium"),
+                                    "severity": _normalize_risk_severity(cr.get("severity")),
                                     "assumption": f"Model cited '{fp}' which is not in PR changed files.",
                                     "verification_needed": str(cr.get("evidence") or "Verify target file."),
                                 }
@@ -522,7 +567,35 @@ async def analyze_pr_with_static_and_gemini(
                                 result["unknowns"].append(unk)
                                 seen_unk.add(str(unk.get("title", "")).lower())
                     if parsed.get("flag_opportunities"):
-                        result["flag_opportunities"] = list(parsed["flag_opportunities"])
+                        norm_opps: list[dict[str, Any]] = []
+                        for opp in parsed["flag_opportunities"]:
+                            if not isinstance(opp, dict):
+                                continue
+                            s_key = str(
+                                opp.get("suggested_flag_key") or opp.get("flag_key") or ""
+                            ).strip()
+                            if not s_key:
+                                continue
+                            t_files = opp.get("target_files")
+                            norm_opps.append(
+                                {
+                                    "suggested_flag_key": s_key,
+                                    "flag_type": _normalize_flag_type(opp.get("flag_type")),
+                                    "target_files": [str(f) for f in t_files]
+                                    if isinstance(t_files, list)
+                                    else [],
+                                    "rationale": str(
+                                        opp.get("rationale")
+                                        or "Gate risky path behind a Flagsmith feature flag."
+                                    ),
+                                    "recommended_rollout": str(
+                                        opp.get("recommended_rollout")
+                                        or "10% -> 25% -> 50% -> 75% -> 100%"
+                                    ),
+                                }
+                            )
+                        if norm_opps:
+                            result["flag_opportunities"] = norm_opps
                     result["analysis_mode"] = "gemini_ai"
         except Exception as exc:  # noqa: BLE001
             from app.core.security import scrub_secrets

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Query, Request
@@ -34,18 +36,22 @@ from app.api.deps import (
 )
 from app.api.v1.errors import APIException
 from app.core.database import utcnow
+from app.integrations.flagsmith_client import FlagsmithAPIError, FlagsmithClient
 from app.models import (
     ActorType,
     AgentSession,
     AgentSessionStatus,
     AgentTask,
     AgentTaskStatus,
+    AnalyticsMode,
     Approval,
     ApprovalStatus,
     AuditStatus,
     CodeChange,
     CodeChangeStatus,
     CodeChangeType,
+    Experiment,
+    ExperimentStatus,
     FeatureFlag,
     PolicyCategory,
     Repository,
@@ -53,10 +59,12 @@ from app.models import (
     User,
     ValidationStatus,
 )
+from app.models.enums import default_traffic_allocation
 from app.schemas import (
     ApprovalOut,
     CleanupPRRequest,
     CodeChangeOut,
+    ExperimentOut,
     FeatureFlagCreate,
     FeatureFlagOut,
     FlagDeleteRequest,
@@ -68,6 +76,8 @@ from app.schemas import (
     FlagToggleRequest,
     PaginatedResponse,
 )
+
+logger = logging.getLogger("releaseguard.api.flags")
 from app.schemas.tools import (
     FlagsmithCreateFlagInput,
     FlagsmithRollbackFlagInput,
@@ -132,6 +142,252 @@ async def list_feature_flags(
     )
 
 
+def _parse_iso_datetime(value: Any) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _map_flagsmith_experiment_status(raw_status: Any) -> ExperimentStatus:
+    norm = str(raw_status or "").strip().lower()
+    if norm in {"running", "active", "in_progress"}:
+        return ExperimentStatus.RUNNING
+    if norm == "paused":
+        return ExperimentStatus.PAUSED
+    if norm in {"completed", "stopped", "concluded", "finished"}:
+        return ExperimentStatus.COMPLETED
+    if norm == "rolled_back":
+        return ExperimentStatus.ROLLED_BACK
+    return ExperimentStatus.DRAFT
+
+
+def _resolve_experiment_flag(
+    raw_exp: dict[str, Any],
+    *,
+    flag_by_fs_id: dict[int, FeatureFlag],
+    flag_by_key: dict[str, FeatureFlag],
+) -> FeatureFlag | None:
+    feat = raw_exp.get("feature")
+    if isinstance(feat, dict):
+        if feat.get("id") is not None:
+            matched = flag_by_fs_id.get(int(feat["id"]))
+            if matched is not None:
+                return matched
+        if feat.get("name"):
+            matched = flag_by_key.get(str(feat["name"]).strip().lower())
+            if matched is not None:
+                return matched
+    elif feat is not None:
+        try:
+            matched = flag_by_fs_id.get(int(feat))
+            if matched is not None:
+                return matched
+        except (TypeError, ValueError):
+            pass
+
+    if raw_exp.get("feature_id") is not None:
+        try:
+            matched = flag_by_fs_id.get(int(raw_exp["feature_id"]))
+            if matched is not None:
+                return matched
+        except (TypeError, ValueError):
+            pass
+
+    exp_name = str(raw_exp.get("name") or "").strip().lower()
+    if exp_name and exp_name in flag_by_key:
+        return flag_by_key[exp_name]
+    return None
+
+
+def _extract_experiment_variations_and_allocation(
+    raw_exp: dict[str, Any],
+    flag: FeatureFlag,
+    env_norm: str,
+) -> tuple[str, str, dict[str, int]]:
+    mv_opts = [opt for opt in (flag.mv_options or []) if isinstance(opt, dict)]
+    opt_name_by_id = {
+        int(opt["id"]): str(opt.get("value") or "")
+        for opt in mv_opts
+        if opt.get("id") is not None and opt.get("value")
+    }
+
+    allocation: dict[str, int] = {}
+    rollout_cfg = raw_exp.get("experiment_rollout")
+    if isinstance(rollout_cfg, dict):
+        for item in rollout_cfg.get("multivariate_feature_state_values") or []:
+            if not isinstance(item, dict):
+                continue
+            opt_id = item.get("multivariate_feature_option")
+            opt_val = item.get("value") or (
+                opt_name_by_id.get(int(opt_id)) if opt_id is not None else None
+            )
+            if opt_val:
+                allocation[str(opt_val)] = round(float(item.get("percentage_allocation") or 0))
+
+    if not allocation and isinstance(flag.env_states, dict):
+        env_state = flag.env_states.get(env_norm)
+        if isinstance(env_state, dict):
+            for item in env_state.get("mv_options") or []:
+                if isinstance(item, dict) and item.get("value"):
+                    allocation[str(item["value"])] = round(
+                        float(item.get("percentage_allocation") or 0)
+                    )
+
+    if not allocation and mv_opts:
+        for opt in mv_opts:
+            val = str(opt.get("value") or "").strip()
+            if val:
+                allocation[val] = round(float(opt.get("default_percentage_allocation") or 0))
+
+    if not allocation:
+        allocation = default_traffic_allocation()
+
+    keys = list(allocation.keys())
+    control = next((k for k in keys if "control" in k.lower()), keys[0] if keys else "control")
+    treatment = next((k for k in keys if k != control), "treatment")
+    return control, treatment, allocation
+
+
+def _extract_primary_metric(raw_exp: dict[str, Any], default: str = "checkout_completed") -> str:
+    metrics = raw_exp.get("metrics")
+    if isinstance(metrics, list) and metrics:
+        first = metrics[0]
+        if isinstance(first, dict):
+            metric_obj = first.get("metric")
+            if isinstance(metric_obj, dict) and metric_obj.get("name"):
+                return str(metric_obj["name"])[:64]
+            for key in ("name", "metric_name", "event_name"):
+                if first.get(key):
+                    return str(first[key])[:64]
+    return default
+
+
+async def _sync_native_experiments_for_project(
+    session: AsyncSession,
+    fs: FlagsmithClient,
+    project_id: int,
+    synced_flags: list[FeatureFlag],
+) -> list[Experiment]:
+    """Sync Flagsmith native experiments across project environments idempotently."""
+    try:
+        envs = await fs.list_environments(project_id)
+    except (FlagsmithAPIError, Exception) as exc:  # noqa: BLE001
+        logger.debug("Skipping Flagsmith environment listing for experiment sync: %s", exc)
+        return []
+
+    all_project_flags = list(
+        (
+            await session.execute(
+                select(FeatureFlag).where(FeatureFlag.flagsmith_project_id == project_id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    flag_by_fs_id: dict[int, FeatureFlag] = {}
+    flag_by_key: dict[str, FeatureFlag] = {}
+    for flag in [*all_project_flags, *synced_flags]:
+        if flag.flagsmith_feature_id is not None:
+            flag_by_fs_id[int(flag.flagsmith_feature_id)] = flag
+        if flag.key:
+            flag_by_key[flag.key.strip().lower()] = flag
+
+    synced_experiments: list[Experiment] = []
+    for env in envs:
+        env_name = str(env.get("name") or "").strip().lower()
+        env_key = str(env.get("api_key") or "").strip()
+        if not env_name or not env_key:
+            continue
+        try:
+            raw_experiments = await fs.list_experiments(env_key)
+        except (FlagsmithAPIError, Exception) as exc:  # noqa: BLE001
+            logger.debug(
+                "Skipping native experiments sync for env '%s': %s", env_name, exc
+            )
+            continue
+
+        for raw_exp in raw_experiments:
+            if not isinstance(raw_exp, dict) or raw_exp.get("id") is None:
+                continue
+            fs_exp_id = str(raw_exp["id"])
+            flag = _resolve_experiment_flag(
+                raw_exp, flag_by_fs_id=flag_by_fs_id, flag_by_key=flag_by_key
+            )
+            if flag is None:
+                logger.debug(
+                    "Skipping Flagsmith experiment #%s (%s): no matching local FeatureFlag.",
+                    fs_exp_id,
+                    raw_exp.get("name"),
+                )
+                continue
+
+            exp_name = str(raw_exp.get("name") or flag.key)[:255]
+            hypothesis = str(
+                raw_exp.get("hypothesis") or f"Flagsmith native experiment for {flag.key}."
+            )
+            status = _map_flagsmith_experiment_status(raw_exp.get("status"))
+            control, treatment, allocation = _extract_experiment_variations_and_allocation(
+                raw_exp, flag, env_name
+            )
+            primary_metric = _extract_primary_metric(raw_exp)
+            started_at = _parse_iso_datetime(raw_exp.get("started_at")) or (
+                utcnow() if status == ExperimentStatus.RUNNING else None
+            )
+            ended_at = _parse_iso_datetime(raw_exp.get("ended_at") or raw_exp.get("stopped_at"))
+
+            existing = (
+                await session.execute(
+                    select(Experiment)
+                    .where(Experiment.flagsmith_experiment_id == fs_exp_id)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+
+            if existing is None:
+                existing = Experiment(
+                    feature_flag_id=flag.id,
+                    name=exp_name,
+                    hypothesis=hypothesis,
+                    environment_name=env_name,
+                    environment_key=env_key,
+                    analytics_mode=AnalyticsMode.FLAGSMITH_NATIVE,
+                    flagsmith_experiment_id=fs_exp_id,
+                    status=status,
+                    control_variation=control,
+                    treatment_variation=treatment,
+                    traffic_allocation=allocation,
+                    primary_metric=primary_metric,
+                    started_at=started_at,
+                    ended_at=ended_at,
+                )
+                session.add(existing)
+            else:
+                existing.feature_flag_id = flag.id
+                existing.name = exp_name
+                existing.hypothesis = hypothesis
+                existing.environment_name = env_name
+                existing.environment_key = env_key
+                existing.analytics_mode = AnalyticsMode.FLAGSMITH_NATIVE
+                existing.status = status
+                existing.control_variation = control
+                existing.treatment_variation = treatment
+                existing.traffic_allocation = allocation
+                if primary_metric:
+                    existing.primary_metric = primary_metric
+                if started_at is not None:
+                    existing.started_at = existing.started_at or started_at
+                if ended_at is not None:
+                    existing.ended_at = ended_at
+
+            await session.flush()
+            synced_experiments.append(existing)
+
+    return synced_experiments
+
+
 @flags_router.post("/sync")
 async def sync_feature_flags(
     request: Request,
@@ -139,7 +395,7 @@ async def sync_feature_flags(
     operator: DefaultOperator,
     project_id: Annotated[int | None, Query()] = None,
 ) -> dict[str, Any]:
-    """Sync Flagsmith projects, environments, features, mv-options, and feature states."""
+    """Sync Flagsmith projects, environments, features, mv-options, feature states, and native experiments."""
     ctx = await build_tool_context(request.app, session, user_id=operator.id)
     fs = await build_flagsmith_client(request.app, session)
 
@@ -153,13 +409,23 @@ async def sync_feature_flags(
         pid = int(projects[0]["id"])
 
     raw_flags = await fs.list_flags(pid)
+    synced_flag_objs: list[FeatureFlag] = []
     synced_items: list[dict[str, Any]] = []
     for raw in raw_flags:
         key = str(raw.get("name", ""))
         if not key:
             continue
         flag_obj = await ctx.sync_flag_from_flagsmith(key, project_id=pid)
+        synced_flag_objs.append(flag_obj)
         synced_items.append(FeatureFlagOut.model_validate(flag_obj).model_dump(mode="json"))
+
+    synced_exp_objs = await _sync_native_experiments_for_project(
+        session, fs, pid, synced_flag_objs
+    )
+    synced_experiments = [
+        ExperimentOut.model_validate(exp).model_dump(mode="json")
+        for exp in synced_exp_objs
+    ]
 
     await PolicyEngine.record_audit_log(
         session,
@@ -169,10 +435,19 @@ async def sync_feature_flags(
         event_action="flagsmith.synced",
         resource_type="feature_flag",
         status=AuditStatus.SUCCESS,
-        details={"project_id": pid, "synced_count": len(synced_items)},
+        details={
+            "project_id": pid,
+            "synced_count": len(synced_items),
+            "experiments_synced_count": len(synced_experiments),
+        },
     )
     await session.commit()
-    return {"synced_count": len(synced_items), "items": synced_items}
+    return {
+        "synced_count": len(synced_items),
+        "items": synced_items,
+        "experiments_synced_count": len(synced_experiments),
+        "experiments": synced_experiments,
+    }
 
 
 @flags_router.post("", status_code=201)

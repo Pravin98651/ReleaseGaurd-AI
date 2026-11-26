@@ -5,6 +5,8 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from sqlalchemy import select
+
 from app.agents.tools.context import ToolExecutionContext, _extract_pct_from_seg
 from app.agents.tools.experiment_tools import (
     handle_activate_experiment,
@@ -26,6 +28,9 @@ from app.models import (
     CodeChange,
     Experiment,
     FeatureFlag,
+    ProgressiveRollout,
+    ProgressiveRolloutStage,
+    ProgressiveStageStatus,
     RolloutAction,
     ValidationStatus,
 )
@@ -221,6 +226,22 @@ async def capture_expected_precondition(
             precond["flag_rollout_percentage"] = flag_snap["rollout_percentage"]
         return ("experiment", str(exp.id), precond, env_states)
 
+    if norm in ("progressive_rollout_activate_stage", "progressive_rollout_rollback"):
+        rollout_id = uuid.UUID(str(action_payload["rollout_id"]))
+        rollout = await ctx.session.get(ProgressiveRollout, rollout_id)
+        if rollout is None:
+            raise ValueError(f"ProgressiveRollout {rollout_id} not found.")
+        flag = await ctx.session.get(FeatureFlag, rollout.feature_flag_id)
+        precond = {
+            "rollout_id": str(rollout.id),
+            "rollout_version": rollout.version,
+            "current_percentage": rollout.current_percentage,
+            "status": rollout.status.value,
+            "environment": rollout.environment,
+        }
+        env_states = dict(flag.env_states or {}) if flag is not None else None
+        return ("progressive_rollout", str(rollout.id), precond, env_states)
+
     raise ValueError(f"Unsupported approval action_type '{action_type}'.")
 
 
@@ -373,6 +394,82 @@ async def _run_revalidation(
                     "actual_status": exp.status.value,
                 },
             }
+        return {"ok": True, "details": {"status": exp.status.value}}
+
+    if norm in ("progressive_rollout_activate_stage", "progressive_rollout_rollback"):
+        from app.services.progressive_delivery.rollout_service import (
+            TERMINAL_ROLLOUT_STATES,
+        )
+
+        rollout_raw_id = approval.action_payload.get("rollout_id") or approval.target_resource_id
+        rollout = await ctx.session.get(ProgressiveRollout, uuid.UUID(str(rollout_raw_id)))
+        if rollout is None:
+            return {"ok": False, "details": {"error": "Progressive rollout not found."}}
+        if rollout.status in TERMINAL_ROLLOUT_STATES:
+            return {
+                "ok": False,
+                "details": {
+                    "error": f"Progressive rollout is in terminal state '{rollout.status.value}'."
+                },
+            }
+        expected_ver = pre.get("rollout_version")
+        if expected_ver is not None and rollout.version != int(expected_ver):
+            return {
+                "ok": False,
+                "details": {
+                    "error": "Progressive rollout modified since approval was requested.",
+                    "expected_version": expected_ver,
+                    "actual_version": rollout.version,
+                },
+            }
+        expected_pct = pre.get("current_percentage")
+        if (
+            norm == "progressive_rollout_activate_stage"
+            and expected_pct is not None
+            and rollout.current_percentage != int(expected_pct)
+        ):
+            return {
+                "ok": False,
+                "details": {
+                    "error": "Rollout percentage changed since approval was requested.",
+                    "expected_percentage": expected_pct,
+                    "actual_percentage": rollout.current_percentage,
+                },
+            }
+        flag = await ctx.session.get(FeatureFlag, rollout.feature_flag_id)
+        if flag is None or flag.is_archived:
+            return {"ok": False, "details": {"error": "Feature flag is missing or archived."}}
+        if norm == "progressive_rollout_activate_stage":
+            stage_num = approval.action_payload.get("stage_number")
+            if stage_num is not None:
+                stage = (
+                    await ctx.session.execute(
+                        select(ProgressiveRolloutStage)
+                        .where(
+                            ProgressiveRolloutStage.rollout_id == rollout.id,
+                            ProgressiveRolloutStage.stage_number == int(stage_num),
+                        )
+                        .limit(1)
+                    )
+                ).scalar_one_or_none()
+                if stage is None or stage.status in {
+                    ProgressiveStageStatus.PASSED,
+                    ProgressiveStageStatus.SKIPPED,
+                }:
+                    return {
+                        "ok": False,
+                        "details": {
+                            "error": f"Stage {stage_num} is missing or already completed."
+                        },
+                    }
+        return {
+            "ok": True,
+            "details": {
+                "rollout_version": rollout.version,
+                "current_percentage": rollout.current_percentage,
+                "status": rollout.status.value,
+            },
+        }
 
     if norm == "release_rollout_approve":
         from app.models import Release
@@ -391,9 +488,22 @@ async def _run_revalidation(
                 },
             }
         return {"ok": True, "details": {"release_version": rel.version}}
-        return {"ok": True, "details": {"status": exp.status.value}}
 
     return {"ok": False, "details": {"error": f"Unknown action_type '{approval.action_type}'"}}
+
+
+async def _resolve_rollout_flagsmith_client(
+    ctx: ToolExecutionContext,
+    flag: FeatureFlag | None,
+) -> Any | None:
+    if ctx.flagsmith_client is not None:
+        return ctx.flagsmith_client
+    try:
+        return await ctx.get_flagsmith_client()
+    except ValueError:
+        if flag is not None and flag.flagsmith_feature_id is not None:
+            raise
+        return None
 
 
 async def _run_execution(
@@ -457,6 +567,102 @@ async def _run_execution(
             "verified": True,
             "release_id": str(approval.target_resource_id),
             "release_version": payload.get("release_version"),
+        }
+
+    if norm == "progressive_rollout_activate_stage":
+        from app.services.progressive_delivery.rollout_service import (
+            ProgressiveDeliveryService,
+        )
+
+        rollout_raw_id = payload.get("rollout_id") or approval.target_resource_id
+        rollout = await ctx.session.get(ProgressiveRollout, uuid.UUID(str(rollout_raw_id)))
+        if rollout is None:
+            raise ValueError(f"ProgressiveRollout {rollout_raw_id} not found.")
+        stage: ProgressiveRolloutStage | None = None
+        if payload.get("stage_number") is not None:
+            stage = (
+                await ctx.session.execute(
+                    select(ProgressiveRolloutStage)
+                    .where(
+                        ProgressiveRolloutStage.rollout_id == rollout.id,
+                        ProgressiveRolloutStage.stage_number == int(payload["stage_number"]),
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if stage is None and rollout.current_stage_id is not None:
+            stage = await ctx.session.get(ProgressiveRolloutStage, rollout.current_stage_id)
+        if stage is None:
+            stage = (
+                await ctx.session.execute(
+                    select(ProgressiveRolloutStage)
+                    .where(
+                        ProgressiveRolloutStage.rollout_id == rollout.id,
+                        ProgressiveRolloutStage.status.in_(
+                            [
+                                ProgressiveStageStatus.AWAITING_APPROVAL,
+                                ProgressiveStageStatus.PENDING,
+                            ]
+                        ),
+                    )
+                    .order_by(ProgressiveRolloutStage.stage_number)
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+        if stage is None:
+            raise ValueError(f"No pending stage found for rollout {rollout.id}.")
+
+        flag = await ctx.session.get(FeatureFlag, rollout.feature_flag_id)
+        fs_client = await _resolve_rollout_flagsmith_client(ctx, flag)
+        actor_id = ctx.user_id or approval.decided_by_id or approval.requested_by_id
+        await ProgressiveDeliveryService._activate_stage(
+            ctx.session,
+            rollout,
+            stage,
+            actor_id=actor_id,
+            flagsmith_client=fs_client,
+        )
+        return {
+            "verified": True,
+            "rollout_id": str(rollout.id),
+            "rollout_key": rollout.rollout_key,
+            "stage_number": stage.stage_number,
+            "target_percentage": stage.target_percentage,
+            "status": rollout.status.value,
+        }
+
+    if norm == "progressive_rollout_rollback":
+        from app.services.progressive_delivery.rollout_service import (
+            ProgressiveDeliveryService,
+        )
+
+        rollout_raw_id = payload.get("rollout_id") or approval.target_resource_id
+        rollout = await ctx.session.get(ProgressiveRollout, uuid.UUID(str(rollout_raw_id)))
+        if rollout is None:
+            raise ValueError(f"ProgressiveRollout {rollout_raw_id} not found.")
+        flag = await ctx.session.get(FeatureFlag, rollout.feature_flag_id)
+        fs_client = await _resolve_rollout_flagsmith_client(ctx, flag)
+        actor_id = ctx.user_id or approval.decided_by_id or approval.requested_by_id
+        op = await ProgressiveDeliveryService.execute_rollback(
+            ctx.session,
+            rollout,
+            actor_id=actor_id,
+            reason=str(
+                payload.get("reason")
+                or approval.rationale
+                or "Approved progressive rollout rollback"
+            ),
+            flagsmith_client=fs_client,
+            has_production_approval=True,
+        )
+        op.approval_id = approval.id
+        await ctx.session.flush()
+        return {
+            "verified": True,
+            "rollback_operation_id": str(op.id),
+            "rollout_id": str(rollout.id),
+            "status": rollout.status.value,
+            "current_percentage": rollout.current_percentage,
         }
 
     raise ValueError(f"Unsupported approval action_type '{approval.action_type}'.")

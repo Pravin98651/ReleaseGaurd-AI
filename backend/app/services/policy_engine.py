@@ -195,6 +195,10 @@ ENV_SCOPED_MUTATIONS = frozenset(
         "stop_or_conclude_experiment",
         "release.rollout_approve",
         "release_rollout_approve",
+        "progressive_rollout.activate_stage",
+        "progressive_rollout_activate_stage",
+        "progressive_rollout.rollback",
+        "progressive_rollout_rollback",
     }
 )
 

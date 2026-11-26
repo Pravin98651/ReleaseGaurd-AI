@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     Float,
     ForeignKey,
@@ -37,7 +38,7 @@ class Organization(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     slug: Mapped[str] = mapped_column(String(80), nullable=False)
-    github_org_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    github_org_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     settings: Mapped[dict[str, Any]] = mapped_column(JSONBCompat, nullable=False, default=dict)
     created_at: Mapped[datetime] = mapped_column(
         TZDateTime, nullable=False, default=utcnow, server_default=func.now()
@@ -62,7 +63,7 @@ class OrganizationRepository(Base):
     repository_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("repositories.id", ondelete="CASCADE"), nullable=False
     )
-    github_repository_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    github_repository_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
     monitoring_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     last_synced_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)

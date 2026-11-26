@@ -107,8 +107,8 @@ async def _collect_existing_flag_keys(
     if repo.flagsmith_project_id:
         try:
             fs = await build_flagsmith_client(request.app, session)
-            if fs.is_configured:
-                remote_flags = await fs.list_features(repo.flagsmith_project_id)
+            if getattr(fs, "org_token", None):
+                remote_flags = await fs.list_flags(repo.flagsmith_project_id)
                 for rf in remote_flags:
                     name = str(rf.get("name") or "").strip()
                     if name:

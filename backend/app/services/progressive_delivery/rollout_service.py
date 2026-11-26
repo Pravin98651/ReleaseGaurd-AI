@@ -10,6 +10,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import get_settings
 from app.core.database import ensure_utc, utcnow
 from app.core.security import compute_action_hash, redact_dict, scrub_secrets
 from app.models import (
@@ -22,6 +23,9 @@ from app.models import (
     FeatureFlag,
     GuardrailEvalStatus,
     GuardrailOperator,
+    IntegrationConnection,
+    IntegrationProvider,
+    IntegrationStatus,
     NotificationCategory,
     PolicyCategory,
     ProgressiveRollout,
@@ -339,6 +343,55 @@ class ProgressiveDeliveryService:
         return {"valid": not blockers, "blockers": blockers}
 
     @staticmethod
+    async def _resolve_flagsmith_env_key(
+        session: AsyncSession,
+        flagsmith_client: Any,
+        environment_name: str,
+        flag: FeatureFlag,
+        project_id: int,
+    ) -> str:
+        env_norm = environment_name.strip().lower()
+        if isinstance(flag.env_states, dict):
+            for k, state in flag.env_states.items():
+                if k.strip().lower() == env_norm and isinstance(state, dict):
+                    ek = str(state.get("env_key") or "").strip()
+                    if ek:
+                        return ek
+
+        stmt = (
+            select(IntegrationConnection)
+            .where(
+                IntegrationConnection.provider == IntegrationProvider.FLAGSMITH,
+                IntegrationConnection.status == IntegrationStatus.CONNECTED,
+            )
+            .order_by(IntegrationConnection.updated_at.desc())
+            .limit(1)
+        )
+        conn = (await session.execute(stmt)).scalar_one_or_none()
+        if conn is not None and isinstance(conn.metadata_json, dict):
+            env_map = conn.metadata_json.get("environment_keys") or {}
+            if isinstance(env_map, dict):
+                for k, v in env_map.items():
+                    if str(k).strip().lower() == env_norm and str(v).strip():
+                        return str(v).strip()
+
+        cfg_keys = get_settings().flagsmith_env_keys
+        for k, v in cfg_keys.items():
+            if k.strip().lower() == env_norm and v.strip():
+                return v.strip()
+
+        envs = await flagsmith_client.list_environments(project_id)
+        for env in envs:
+            if str(env.get("name", "")).strip().lower() == env_norm and env.get("api_key"):
+                return str(env["api_key"])
+
+        raise ProgressiveDeliveryError(
+            f"Could not resolve Flagsmith environment key for '{environment_name}'.",
+            status_code=422,
+            code="flagsmith_env_key_missing",
+        )
+
+    @staticmethod
     async def _apply_flagsmith_stage(
         session: AsyncSession,
         rollout: ProgressiveRollout,
@@ -356,28 +409,73 @@ class ProgressiveDeliveryService:
             "enabled": target_pct > 0,
             "rollout_percentage": target_pct,
         }
-        if flagsmith_client is not None and getattr(flagsmith_client, "is_configured", False):
-            # Real Flagsmith readback verification when client is configured
-            env_obj = await flagsmith_client.find_environment_by_name(
-                flag.flagsmith_project_id, rollout.environment
+        has_live_client = (
+            flagsmith_client is not None
+            and bool(str(getattr(flagsmith_client, "org_token", "") or "").strip())
+            and flag.flagsmith_feature_id is not None
+        )
+        if has_live_client:
+            try:
+                project_id = int(flag.flagsmith_project_id)
+            except (TypeError, ValueError) as exc:
+                raise ProgressiveDeliveryError(
+                    f"Invalid Flagsmith project_id '{flag.flagsmith_project_id}'.",
+                    status_code=422,
+                    code="flagsmith_project_invalid",
+                ) from exc
+
+            feature_id = int(flag.flagsmith_feature_id)
+            env_key = await ProgressiveDeliveryService._resolve_flagsmith_env_key(
+                session, flagsmith_client, rollout.environment, flag, project_id
             )
-            if env_obj is not None:
-                await flagsmith_client.set_feature_state(
-                    env_obj["api_key"],
-                    flag.key,
-                    enabled=(target_pct > 0),
+            if target_pct == 0:
+                await flagsmith_client.rollback_flag(
+                    project_id=project_id,
+                    env_key=env_key,
+                    feature_id=feature_id,
+                    flag_key=flag.key,
                 )
-                live = await flagsmith_client.get_environment_feature_state(
-                    env_obj["api_key"], flag.key
+            else:
+                await flagsmith_client.set_gradual_rollout_stage(
+                    project_id=project_id,
+                    env_key=env_key,
+                    feature_id=feature_id,
+                    flag_key=flag.key,
+                    target_percentage=target_pct,
+                    strategy="percentage_split_segment",
                 )
-                readback = {
-                    "enabled": bool(live.get("enabled", target_pct > 0)),
-                    "rollout_percentage": target_pct,
-                    "provider": "flagsmith_live",
-                }
-                verified = True
+
+            verification = await flagsmith_client.verify_live_state(
+                env_key=env_key,
+                feature_id=feature_id,
+                flag_key=flag.key,
+                project_id=project_id,
+                expected_enabled=(target_pct == 100),
+                expected_percentage=target_pct,
+            )
+            verified = bool(verification.get("matches", False))
+            actual_state = dict(verification.get("actual_state") or {})
+            readback = {
+                "enabled": bool(actual_state.get("enabled", target_pct > 0)),
+                "rollout_percentage": (
+                    int(actual_state["rollout_percentage"])
+                    if actual_state.get("rollout_percentage") is not None
+                    else target_pct
+                ),
+                "percentage_split": target_pct,
+                "env_key": env_key,
+                "provider": "flagsmith_live",
+                "verification": verification,
+            }
+            if not verified:
+                raise ProgressiveDeliveryError(
+                    f"Flagsmith live state verification failed: {verification.get('mismatches')}",
+                    status_code=502,
+                    code="flagsmith_verification_failed",
+                )
         else:
             # Local DB state tracking when external Flagsmith transport isn't attached
+            readback["percentage_split"] = target_pct
             readback["provider"] = "local_state_only"
             verified = True
 
@@ -467,7 +565,7 @@ class ProgressiveDeliveryService:
                 title=f"Authorize Production Rollout {rollout.rollout_key} Stage 1 ({stage1.target_percentage}%)",
                 rationale=f"Production progressive rollout start for {rollout.feature_flag_key}.",
                 action_payload=payload,
-                expected_precondition={"rollout_version": rollout.version, "current_percentage": 0},
+                expected_precondition={"rollout_version": rollout.version + 1, "current_percentage": 0},
                 action_hash=compute_action_hash(
                     "progressive_rollout_activate_stage",
                     "progressive_rollout",
@@ -800,7 +898,7 @@ class ProgressiveDeliveryService:
         session: AsyncSession,
         rollout: ProgressiveRollout,
         *,
-        actor_id: uuid.UUID,
+        actor_id: uuid.UUID | None = None,
         reason: str,
         flagsmith_client: Any | None = None,
         has_production_approval: bool = False,
@@ -847,7 +945,7 @@ class ProgressiveDeliveryService:
             stage_id=rollout.current_stage_id,
             event_type="rolled_back",
             actor_id=actor_id,
-            actor_type=ActorType.USER,
+            actor_type=ActorType.USER if actor_id else ActorType.SYSTEM,
             message=f"Rolled back {rollout.feature_flag_key} in {rollout.environment} to 0%: {reason}",
             data={"verification": readback},
         )

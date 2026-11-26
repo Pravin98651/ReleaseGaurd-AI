@@ -17,6 +17,7 @@ from app.core.database import utcnow
 from app.core.security import compute_action_hash, redact_dict, scrub_secrets
 from app.models import (
     ActorType,
+    AnalysisStatus,
     Approval,
     ApprovalCategory,
     ApprovalStatus,
@@ -37,6 +38,7 @@ from app.models import (
     ReleaseStatus,
     ReleaseType,
     Repository,
+    RiskClassification,
     RiskLevel,
     ValidationStatus,
 )
@@ -51,11 +53,34 @@ from app.services.release_state_machine import (
     ACTIVE_EXECUTION_STATES,
     TERMINAL_RELEASE_STATES,
     ReleaseTransitionError,
+    can_transition,
     record_release_event,
     transition_release,
 )
 
 logger = logging.getLogger("releaseguard.release_orchestrator")
+
+_RISK_RANK: dict[RiskLevel, int] = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+    RiskLevel.CRITICAL: 3,
+}
+
+
+def _classification_to_risk_level(
+    classification: RiskClassification,
+    static_level: RiskLevel,
+) -> RiskLevel:
+    mapping = {
+        RiskClassification.LOW: RiskLevel.LOW,
+        RiskClassification.MODERATE: RiskLevel.MEDIUM,
+        RiskClassification.ELEVATED: RiskLevel.MEDIUM,
+        RiskClassification.HIGH: RiskLevel.HIGH,
+        RiskClassification.CRITICAL: RiskLevel.CRITICAL,
+    }
+    engine_level = mapping.get(classification, RiskLevel.MEDIUM)
+    return engine_level if _RISK_RANK[engine_level] >= _RISK_RANK[static_level] else static_level
 
 STAGE_DEFINITIONS: list[tuple[ReleaseStageKey, int, str]] = [
     (ReleaseStageKey.DRAFT, 1, "Draft & Scope"),
@@ -495,7 +520,7 @@ class ReleaseOrchestrator:
             st_fetch = await AgentExecutionService.start_step(
                 session, exe, step_key="fetch_files", step_name="Retrieve PR Files"
             )
-            if github_client is not None and getattr(github_client, "is_configured", False):
+            if github_client is not None and getattr(github_client, "token", ""):
                 tc_gh = await AgentExecutionService.record_tool_start(
                     session,
                     exe,
@@ -541,24 +566,72 @@ class ReleaseOrchestrator:
                 input_summary={"pr_number": pr.github_pr_number, "files_count": len(files)},
             )
             result = await analyze_pr_with_static_and_gemini(
-                session=session,
-                repo=repo,
-                pr=pr,
-                files=files,
+                pr_title=pr.title,
+                pr_body=pr.body,
+                files_data=files,
+                repo_full_name=repo.full_name,
+                pr_number=pr.github_pr_number,
                 gemini_client=gemini_client,
             )
+
+            from app.services.risk_engine.risk_service import (
+                IntelligentReleaseRiskService,
+            )
+
+            static_level = RiskLevel(str(result.get("risk_level") or "medium").lower())
+            static_score = int(result.get("risk_score") or 0)
+            assessment = await IntelligentReleaseRiskService.assess_release(
+                session,
+                release_id=release.id,
+                pull_request_id=pr.id,
+                repository_id=repo.id,
+                target_environment=release.target_environment,
+                actor_id=actor_id,
+                github_client=github_client,
+                gemini_client=gemini_client,
+                files_override=files,
+                create_execution=True,
+            )
+            combined_score = max(static_score, int(assessment.risk_score or 0))
+            combined_level = _classification_to_risk_level(assessment.risk_level, static_level)
+
+            pr.risk_score = combined_score
+            pr.risk_level = combined_level
+            pr.analysis_summary = str(result.get("analysis_summary") or pr.analysis_summary or "")
+            pr.confirmed_risks = list(result.get("confirmed_risks") or [])
+            pr.potential_risks = list(result.get("potential_risks") or [])
+            pr.flag_opportunities = list(result.get("flag_opportunities") or [])
+            pr.analysis_status = AnalysisStatus.COMPLETED
+            pr.analyzed_at = utcnow()
+
+            enriched_result = {
+                **dict(result),
+                "risk_score": combined_score,
+                "risk_level": combined_level.value,
+                "risk_assessment_id": str(assessment.id),
+                "assessment_key": assessment.assessment_key,
+                "seven_dim_score": assessment.risk_score,
+            }
+
             await AgentExecutionService.record_tool_result(
                 session,
                 exe,
                 tc_ai,
                 success=True,
                 output_summary={
-                    "risk_level": pr.risk_level.value if pr.risk_level else "medium",
-                    "risk_score": result.get("risk_score"),
+                    "risk_level": pr.risk_level.value,
+                    "risk_score": combined_score,
+                    "assessment_key": assessment.assessment_key,
                 },
             )
             await AgentExecutionService.complete_step(
-                session, exe, st_analyze, output_summary={"risk_score": result.get("risk_score")}
+                session,
+                exe,
+                st_analyze,
+                output_summary={
+                    "risk_score": combined_score,
+                    "assessment_key": assessment.assessment_key,
+                },
             )
             await AgentExecutionService.record_decision(
                 session,
@@ -567,16 +640,20 @@ class ReleaseOrchestrator:
                 decision_source=AgentDecisionSource.AI_RECOMMENDATION
                 if gemini_client and getattr(gemini_client, "is_configured", False)
                 else AgentDecisionSource.DETERMINISTIC_RULE,
-                decision_summary=pr.analysis_summary or f"PR #{pr.github_pr_number} assessed as {pr.risk_level.value if pr.risk_level else 'medium'} risk.",
+                decision_summary=pr.analysis_summary or f"PR #{pr.github_pr_number} assessed as {pr.risk_level.value} risk.",
                 recommendation="Use feature-flag protection and validate patch before rollout."
                 if (pr.risk_level in {RiskLevel.HIGH, RiskLevel.CRITICAL})
                 else "Proceed to readiness evaluation.",
                 decision_status=AgentDecisionStatus.ACCEPTED,
                 supporting_evidence=[
-                    f"Risk level: {pr.risk_level.value if pr.risk_level else 'medium'}",
+                    f"Risk level: {pr.risk_level.value} ({combined_score}/100)",
+                    f"Risk assessment: {assessment.assessment_key} (7-dim {assessment.risk_score}/100)",
                     f"Files inspected: {len(files)}",
                 ],
-                evidence_references=[{"type": "pull_request", "id": str(pr.id), "url": pr.html_url}],
+                evidence_references=[
+                    {"type": "pull_request", "id": str(pr.id), "url": pr.html_url},
+                    {"type": "risk_assessment", "id": str(assessment.id), "key": assessment.assessment_key},
+                ],
                 model_name=getattr(gemini_client, "model", None) if gemini_client else None,
                 step_id=st_analyze.id,
             )
@@ -594,8 +671,11 @@ class ReleaseOrchestrator:
             if stage is not None:
                 stage.status = ReleaseStageStatus.PASSED
                 stage.completed_at = utcnow()
-                stage.summary = f"Risk: {release.risk_level.value} (score {result.get('risk_score', 'n/a')})."
-                stage.details_json = redact_dict(dict(result))
+                stage.summary = (
+                    f"Risk: {release.risk_level.value} (score {combined_score}/100; "
+                    f"assessment {assessment.assessment_key})."
+                )
+                stage.details_json = redact_dict(enriched_result)
 
             session.add(
                 ReleaseArtifact(
@@ -606,7 +686,7 @@ class ReleaseOrchestrator:
                     source_id=str(pr.id),
                     uri=pr.html_url,
                     summary=pr.analysis_summary or f"Risk level: {release.risk_level.value}",
-                    content_json=redact_dict(dict(result)),
+                    content_json=redact_dict(enriched_result),
                     created_by_id=actor_id,
                 )
             )
@@ -615,6 +695,14 @@ class ReleaseOrchestrator:
                 if release.feature_flag_id is None
                 else ReleaseStatus.AWAITING_APPROVAL
             )
+            if next_status == ReleaseStatus.AWAITING_APPROVAL:
+                approval_stage = await ReleaseOrchestrator._get_stage(
+                    session, release.id, ReleaseStageKey.APPROVAL_GATE
+                )
+                if approval_stage is not None and approval_stage.status == ReleaseStageStatus.PENDING:
+                    approval_stage.status = ReleaseStageStatus.WAITING
+                    approval_stage.started_at = approval_stage.started_at or utcnow()
+                    approval_stage.summary = "Awaiting human approval gate."
             await transition_release(
                 session,
                 release,
@@ -782,6 +870,26 @@ class ReleaseOrchestrator:
             )
         ).scalar_one_or_none()
         if existing_pending is not None:
+            stage = await ReleaseOrchestrator._get_stage(
+                session, release.id, ReleaseStageKey.APPROVAL_GATE
+            )
+            if stage is not None and stage.status != ReleaseStageStatus.WAITING:
+                stage.status = ReleaseStageStatus.WAITING
+                stage.started_at = stage.started_at or utcnow()
+                stage.summary = stage.summary or f"Approval pending for v{release.version}."
+            if (
+                release.status not in {ReleaseStatus.AWAITING_APPROVAL, ReleaseStatus.PAUSED}
+                and can_transition(release.status, ReleaseStatus.AWAITING_APPROVAL)
+            ):
+                await transition_release(
+                    session,
+                    release,
+                    ReleaseStatus.AWAITING_APPROVAL,
+                    actor_id=actor_id,
+                    actor_type=ActorType.USER,
+                    stage_key=ReleaseStageKey.APPROVAL_GATE,
+                    title="Awaiting existing pending approval",
+                )
             return existing_pending
 
         is_prod = is_production_environment(release.target_environment)
@@ -889,12 +997,29 @@ class ReleaseOrchestrator:
         stage = await ReleaseOrchestrator._get_stage(
             session, release.id, ReleaseStageKey.APPROVAL_GATE
         )
+        now = utcnow()
         if approved:
             if stage is not None:
+                stage.started_at = stage.started_at or now
                 stage.status = ReleaseStageStatus.PASSED
-                stage.completed_at = utcnow()
+                stage.completed_at = now
                 stage.summary = f"Approved by operator ({comment or 'no comment'})."
-            if release.status != ReleaseStatus.APPROVED:
+            if release.status == ReleaseStatus.PAUSED:
+                release.previous_status = ReleaseStatus.APPROVED
+                await record_release_event(
+                    session,
+                    release,
+                    event_type="approval.decided_while_paused",
+                    stage_key=ReleaseStageKey.APPROVAL_GATE,
+                    actor_id=actor_id,
+                    actor_type=ActorType.USER if actor_id else ActorType.SYSTEM,
+                    title="Approval granted while release paused",
+                    message=comment,
+                    payload={"approval_id": str(approval.id)},
+                )
+            elif release.status != ReleaseStatus.APPROVED and can_transition(
+                release.status, ReleaseStatus.APPROVED
+            ):
                 await transition_release(
                     session,
                     release,
@@ -908,20 +1033,36 @@ class ReleaseOrchestrator:
                 )
         else:
             if stage is not None:
+                stage.started_at = stage.started_at or now
                 stage.status = ReleaseStageStatus.BLOCKED
+                stage.completed_at = now
                 stage.summary = f"Approval rejected ({comment or 'no comment'})."
             release.error_message = comment or "Release approval rejected."
-            await transition_release(
-                session,
-                release,
-                ReleaseStatus.BLOCKED,
-                actor_id=actor_id,
-                actor_type=ActorType.USER if actor_id else ActorType.SYSTEM,
-                stage_key=ReleaseStageKey.APPROVAL_GATE,
-                title="Release blocked: approval rejected",
-                message=comment,
-                payload={"approval_id": str(approval.id)},
-            )
+            if can_transition(release.status, ReleaseStatus.BLOCKED):
+                await transition_release(
+                    session,
+                    release,
+                    ReleaseStatus.BLOCKED,
+                    actor_id=actor_id,
+                    actor_type=ActorType.USER if actor_id else ActorType.SYSTEM,
+                    stage_key=ReleaseStageKey.APPROVAL_GATE,
+                    title="Release blocked: approval rejected",
+                    message=comment,
+                    payload={"approval_id": str(approval.id)},
+                )
+            elif release.status == ReleaseStatus.PAUSED:
+                release.previous_status = ReleaseStatus.BLOCKED
+                await record_release_event(
+                    session,
+                    release,
+                    event_type="approval.rejected_while_paused",
+                    stage_key=ReleaseStageKey.APPROVAL_GATE,
+                    actor_id=actor_id,
+                    actor_type=ActorType.USER if actor_id else ActorType.SYSTEM,
+                    title="Approval rejected while release paused",
+                    message=comment,
+                    payload={"approval_id": str(approval.id)},
+                )
             await create_notification(
                 session,
                 category=NotificationCategory.RELEASE_BLOCKED,
@@ -946,7 +1087,7 @@ class ReleaseOrchestrator:
         expected_version: int | None = None,
         reason: str | None = None,
     ) -> Release:
-        return await transition_release(
+        paused_release = await transition_release(
             session,
             release,
             ReleaseStatus.PAUSED,
@@ -957,6 +1098,24 @@ class ReleaseOrchestrator:
             title=f"Release {release.release_key} paused",
             message=reason or "Paused by operator.",
         )
+        stages = list(
+            (
+                await session.execute(
+                    select(ReleaseStage).where(
+                        ReleaseStage.release_id == release.id,
+                        ReleaseStage.status == ReleaseStageStatus.IN_PROGRESS,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for st in stages:
+            st.status = ReleaseStageStatus.WAITING
+            st.details_json = {**(st.details_json or {}), "_paused_from": "in_progress"}
+            if not st.summary:
+                st.summary = reason or "Paused by operator."
+        return paused_release
 
     @staticmethod
     async def resume_release(
@@ -974,7 +1133,7 @@ class ReleaseOrchestrator:
         target = release.previous_status or ReleaseStatus.INITIALIZING
         if target == ReleaseStatus.PAUSED or target in TERMINAL_RELEASE_STATES:
             target = ReleaseStatus.INITIALIZING
-        return await transition_release(
+        resumed = await transition_release(
             session,
             release,
             target,
@@ -984,6 +1143,24 @@ class ReleaseOrchestrator:
             event_type="release.resumed",
             title=f"Release {release.release_key} resumed -> {target.value}",
         )
+        waiting_stages = list(
+            (
+                await session.execute(
+                    select(ReleaseStage).where(
+                        ReleaseStage.release_id == release.id,
+                        ReleaseStage.status == ReleaseStageStatus.WAITING,
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        for st in waiting_stages:
+            details = dict(st.details_json or {})
+            if details.pop("_paused_from", None) == "in_progress":
+                st.status = ReleaseStageStatus.IN_PROGRESS
+                st.details_json = details
+        return resumed
 
     @staticmethod
     async def retry_release(
