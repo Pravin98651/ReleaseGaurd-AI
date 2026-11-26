@@ -136,6 +136,8 @@ CATEGORY_A_ACTIONS = frozenset(
         "flagsmith_verify_live_state",
         "flag_health.scan",
         "scan_flag_health",
+        "flagsmith_explain_identity",
+        "plan_feature_request_rollout",
         # experiment_agent reads/analysis/planning/proposing
         "flagsmith.probe_experiment_capability",
         "flagsmith_probe_experiment_capability",

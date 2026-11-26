@@ -480,8 +480,33 @@ class FlagsmithGovernanceService:
         traits: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Evaluate and explain what a specific identity sees in Flagsmith Edge + repeat stability."""
+        _SENSITIVE_TRAIT_KEYS = {
+            "password",
+            "token",
+            "secret",
+            "api_key",
+            "apikey",
+            "ssn",
+            "credit_card",
+            "card_number",
+            "authorization",
+            "cookie",
+        }
+
+        def _redact_traits(raw: dict[str, Any] | None) -> dict[str, Any]:
+            if not raw:
+                return {}
+            out: dict[str, Any] = {}
+            for k, v in raw.items():
+                if any(s in str(k).lower() for s in _SENSITIVE_TRAIT_KEYS):
+                    out[str(k)] = "[REDACTED]"
+                else:
+                    out[str(k)] = v
+            return out
+
+        env_norm = environment_name.strip().lower()
         client = await ctx.get_flagsmith_client()
-        env_key = await ctx.resolve_env_key(environment_name)
+        env_key = await ctx.resolve_env_key(env_norm)
         first = await client.evaluate_identity_detailed(
             env_key, identifier=identifier, traits=traits
         )
@@ -489,12 +514,64 @@ class FlagsmithGovernanceService:
             env_key, identifier=identifier, traits=traits
         )
         consistent = first["flags"] == second["flags"]
+        safe_traits = _redact_traits(first.get("traits") if isinstance(first.get("traits"), dict) else traits)
+
+        explanations: list[dict[str, Any]] = []
+        table_lines = [
+            f"**Identity:** `{first['identifier']}`",
+            f"**Environment:** `{env_norm}`",
+            "",
+            "| Feature Flag | Observed Result | Fallback Default | Explanation (Inferred vs. Observed) |",
+            "|---|---|---|---|",
+        ]
+        for flag_key, info in sorted(first["flags"].items()):
+            enabled = bool(info.get("enabled", False))
+            val = info.get("value")
+            default_enabled, safe_default = get_flag_safe_default(flag_key)
+            if val is not None and str(val).strip() not in ("", "None"):
+                result_label = str(val) if enabled else f"Disabled ({val})"
+            else:
+                result_label = "Enabled" if enabled else "Disabled"
+
+            if enabled and val is not None and str(val) not in ("control", "v1", "false", ""):
+                why = (
+                    "Observed via Flagsmith Edge API: variant/feature enabled for this identity "
+                    "(matches multivariate split or targeting rule)."
+                )
+            elif enabled:
+                why = "Observed via Flagsmith Edge API: enabled in environment default or matching segment."
+            else:
+                why = "Observed via Flagsmith Edge API: disabled (no matching targeting rule or environment default is off)."
+
+            explanations.append(
+                {
+                    "flag_key": flag_key,
+                    "enabled": enabled,
+                    "value": val,
+                    "result": result_label,
+                    "fallback_default": {"enabled": default_enabled, "value": safe_default},
+                    "evaluation_source": "OBSERVED_EDGE_API",
+                    "explanation_source": "INFERRED_FROM_EDGE_RESPONSE",
+                    "explanation": why,
+                }
+            )
+            table_lines.append(
+                f"| `{flag_key}` | {result_label} | `enabled={default_enabled}, value={safe_default}` | {why} |"
+            )
+
         return {
             "identifier": first["identifier"],
-            "environment_name": environment_name.strip().lower(),
-            "traits": first["traits"],
+            "environment_name": env_norm,
+            "traits": safe_traits,
             "consistent_on_repeat_evaluation": consistent,
             "flags": list(first["flags"].values()),
+            "flag_explanations": explanations,
+            "markdown_summary": "\n".join(table_lines),
+            "evidence_note": (
+                "Flag enabled/value states are directly OBSERVED from Flagsmith Edge API; "
+                "human-readable rule attribution is INFERRED from the returned state because Edge API "
+                "does not expose internal segment IDs."
+            ),
             "security_note": "Client traits are used strictly for product targeting, never for RBAC or security authorization.",
         }
 

@@ -173,9 +173,9 @@ def test_settings_raises_in_production_without_encryption_key() -> None:
         )
 
 
-def test_tool_schema_catalog_contains_all_34_tools() -> None:
-    assert len(TOOL_INPUT_SCHEMAS) == 34
-    assert len(TOOL_OUTPUT_SCHEMAS) == 34
+def test_tool_schema_catalog_contains_all_36_tools() -> None:
+    assert len(TOOL_INPUT_SCHEMAS) == 36
+    assert len(TOOL_OUTPUT_SCHEMAS) == 36
     assert set(TOOL_INPUT_SCHEMAS.keys()) == set(TOOL_OUTPUT_SCHEMAS.keys())
 
 

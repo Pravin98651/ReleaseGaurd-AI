@@ -43,6 +43,10 @@ from app.schemas.tools import (
     FlagsmithCreateFlagInput,
     FlagsmithCreateFlagOutput,
     FlagsmithDeleteOrArchiveFlagInput,
+    FlagsmithExplainIdentityInput,
+    FlagsmithExplainIdentityOutput,
+    PlanFeatureRequestRolloutInput,
+    PlanFeatureRequestRolloutOutput,
     FlagsmithDeleteOrArchiveFlagOutput,
     FlagsmithGetFlagStateInput,
     FlagsmithGetFlagStateOutput,
@@ -841,6 +845,55 @@ async def check_flag_retirement_preconditions(
     }
 
 
+async def handle_flagsmith_explain_identity(
+    ctx: ToolExecutionContext,
+    args: FlagsmithExplainIdentityInput,
+) -> dict[str, Any]:
+    """Category A: Evaluate an identity against Flagsmith Edge and explain assigned flags."""
+    from app.services.flagsmith_service import FlagsmithGovernanceService
+
+    res = await FlagsmithGovernanceService.explain_identity(
+        ctx,
+        environment_name=args.environment_name,
+        identifier=args.identifier,
+        traits=args.traits,
+    )
+    return FlagsmithExplainIdentityOutput(
+        identifier=res["identifier"],
+        environment_name=res["environment_name"],
+        consistent_on_repeat_evaluation=bool(res["consistent_on_repeat_evaluation"]),
+        flag_explanations=list(res.get("flag_explanations") or []),
+        markdown_summary=str(res.get("markdown_summary") or ""),
+        evidence_note=str(res.get("evidence_note") or ""),
+    ).model_dump(mode="json")
+
+
+async def handle_plan_feature_request_rollout(
+    ctx: ToolExecutionContext,
+    args: PlanFeatureRequestRolloutInput,
+) -> dict[str, Any]:
+    """Category A: Turn a natural-language feature request into a flagged rollout plan."""
+    from app.services.feature_request_planner import plan_feature_request_from_prompt
+
+    res = await plan_feature_request_from_prompt(
+        ctx.session,
+        prompt=args.prompt,
+        user_id=ctx.user_id,
+        repository_id=args.repository_id,
+        environment_name=args.environment_name,
+        create_release=args.create_release,
+    )
+    return PlanFeatureRequestRolloutOutput(
+        recommended_flag_key=res["recommended_flag_key"],
+        flag_type=res["flag_type"],
+        control_variation=res["control_variation"],
+        treatment_variation=res["treatment_variation"],
+        release_id=res.get("release_id"),
+        release_key=res.get("release_key"),
+        evidence_class=res.get("evidence_class", "AI_INFERRED"),
+    ).model_dump(mode="json")
+
+
 FLAG_TOOL_HANDLERS: dict[str, Any] = {
     "flagsmith_list_projects": handle_flagsmith_list_projects,
     "flagsmith_list_environments": handle_flagsmith_list_environments,
@@ -855,9 +908,11 @@ FLAG_TOOL_HANDLERS: dict[str, Any] = {
     "flagsmith_verify_live_state": handle_flagsmith_verify_live_state,
     "scan_flag_health": handle_scan_flag_health,
     "flagsmith_delete_or_archive_flag": handle_flagsmith_delete_or_archive_flag,
+    "flagsmith_explain_identity": handle_flagsmith_explain_identity,
+    "plan_feature_request_rollout": handle_plan_feature_request_rollout,
 }
 
 
 def get_flag_tool_names() -> list[str]:
-    """Return ordered list of all 13 flag_agent tool names."""
+    """Return ordered list of all 15 flag_agent tool names."""
     return list(FLAG_TOOL_HANDLERS.keys())

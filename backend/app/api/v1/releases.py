@@ -865,3 +865,40 @@ async def export_release_report_markdown(
         media_type="text/markdown; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+@releases_router.post("/plan-from-prompt", status_code=201)
+async def plan_release_from_prompt(
+    body: dict[str, Any],
+    request: Request,
+    session: DBSession,
+    operator: DefaultOperator,
+) -> dict[str, Any]:
+    """Category A: Convert a natural-language feature request into a flagged rollout plan."""
+    from app.services.feature_request_planner import plan_feature_request_from_prompt
+
+    prompt = str(body.get("prompt") or "").strip()
+    if len(prompt) < 8:
+        raise APIException(
+            422,
+            "INVALID_FEATURE_REQUEST",
+            "Feature request prompt must be at least 8 characters.",
+        )
+    env_name = str(body.get("environment_name") or "development").strip().lower()
+    if not env_name:
+        env_name = "development"
+    repo_raw = body.get("repository_id")
+    repo_id = uuid.UUID(str(repo_raw)) if repo_raw else None
+    create_release = bool(body.get("create_release", True))
+
+    ws = await PolicyEngine.get_workspace_settings(session)
+    gemini_client = build_gemini_client_from_app(request.app, model_override=ws.gemini_model)
+    return await plan_feature_request_from_prompt(
+        session,
+        prompt=prompt,
+        user_id=operator.id,
+        repository_id=repo_id,
+        environment_name=env_name,
+        create_release=create_release,
+        gemini_client=gemini_client,
+    )

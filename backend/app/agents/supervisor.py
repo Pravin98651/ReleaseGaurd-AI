@@ -66,6 +66,22 @@ def route_specialist(user_prompt: str, specialist_hint: str | None = None) -> st
     if any(
         kw in text
         for kw in (
+            "which feature flags",
+            "which flags",
+            "why is user",
+            "seeing the",
+            "receives in the",
+            "explain identity",
+            "identity",
+            "protect it with a feature flag",
+            "protect with a feature flag",
+            "feature request",
+        )
+    ):
+        return "flag_agent"
+    if any(
+        kw in text
+        for kw in (
             "experiment",
             "bayesian",
             "posterior",
@@ -75,6 +91,8 @@ def route_specialist(user_prompt: str, specialist_hint: str | None = None) -> st
             "abandoned",
             "payment_failed",
             "conversion",
+            "winning version",
+            "winner",
         )
     ):
         return "experiment_agent"

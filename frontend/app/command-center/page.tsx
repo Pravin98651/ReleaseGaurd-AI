@@ -20,17 +20,24 @@ import {
 import {
   API_BASE_URL,
   cancelAgentExecution,
+  createAgentSession,
+  getAgentTask,
   getErrorMessage,
   getExecutionOverview,
   listAgentExecutions,
+  listRepositories,
   pauseAgentExecution,
   resumeAgentExecution,
   retryAgentExecution,
+  sendAgentMessage,
 } from "@/lib/api";
+import { subscribeToAgentTask } from "@/lib/sse";
 import type {
   AgentExecutionOverview,
   AgentExecutionRecord,
   AgentExecutionStatus,
+  AgentTask,
+  Repository,
 } from "@/types/releaseguard";
 import { formatTimestamp } from "@/lib/utils";
 import {
@@ -45,6 +52,59 @@ import {
 import { StatusBadge } from "@/components/StatusBadges";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "timed_out"]);
+
+const INTENT_EXAMPLES: Array<{ label: string; prompt: string }> = [
+  {
+    label: "Feature Request",
+    prompt:
+      "Add a new recommendation engine using personalized recommendations. Protect it with a feature flag, compare it against the existing recommendation engine, and gradually release it if the new version performs better.",
+  },
+  {
+    label: "PR Review",
+    prompt:
+      "Review the latest open PR and identify changes that should be protected by feature flags.",
+  },
+  {
+    label: "Experiment",
+    prompt:
+      "Compare the new recommendation engine against the existing implementation using Bayesian analysis.",
+  },
+  {
+    label: "Winner Promotion",
+    prompt:
+      "The experiment has finished. Explain the results and prepare the winning version for human approval.",
+  },
+  {
+    label: "Cleanup",
+    prompt:
+      "Find stale feature flags in this repository and prepare cleanup Draft PRs.",
+  },
+  {
+    label: "Identity Explanation",
+    prompt:
+      "Explain which feature flags user_123 receives in the development environment.",
+  },
+];
+
+function mapExecutionStateLabel(status: string): string {
+  switch (status) {
+    case "running":
+    case "queued":
+      return "ANALYZING / EXECUTING";
+    case "waiting_for_approval":
+      return "AWAITING_APPROVAL";
+    case "completed":
+      return "VERIFIED";
+    case "paused":
+    case "cancelled":
+      return "BLOCKED";
+    case "failed":
+    case "timed_out":
+      return "FAILED";
+    default:
+      return status.toUpperCase();
+  }
+}
 
 export default function CommandCenterPage() {
   const [overview, setOverview] = useState<AgentExecutionOverview | null>(null);
@@ -61,6 +121,66 @@ export default function CommandCenterPage() {
   const [statusFilter, setStatusFilter] = useState("");
   const [failedOnly, setFailedOnly] = useState(false);
   const [refreshTick, setRefreshTick] = useState(0);
+
+  const [nlPrompt, setNlPrompt] = useState("");
+  const [nlEnv, setNlEnv] = useState("development");
+  const [nlDispatching, setNlDispatching] = useState(false);
+  const [liveTask, setLiveTask] = useState<AgentTask | null>(null);
+  const [repos, setRepos] = useState<Repository[]>([]);
+
+  useEffect(() => {
+    listRepositories()
+      .then((res) => setRepos(res.items))
+      .catch(() => {});
+  }, []);
+
+  const handleDispatchPrompt = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const trimmed = nlPrompt.trim();
+    if (!trimmed) return;
+    setNlDispatching(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const repoId = repos[0]?.id;
+      const session = await createAgentSession({
+        title: trimmed.slice(0, 80),
+        context_scope: {
+          environment: nlEnv,
+          ...(repoId ? { repository_id: repoId } : {}),
+        },
+      });
+      const dispatched = await sendAgentMessage(session.id, { content: trimmed });
+      const initialTask = await getAgentTask(dispatched.task_id);
+      setLiveTask(initialTask);
+      setNotice(
+        `Dispatched to ${initialTask.specialist} (state: ${mapExecutionStateLabel(initialTask.status)}).`,
+      );
+      setRefreshTick((n) => n + 1);
+      subscribeToAgentTask(dispatched.task_id, 0, {
+        onStep: () => {
+          getAgentTask(dispatched.task_id)
+            .then((t) => {
+              setLiveTask(t);
+              setRefreshTick((n) => n + 1);
+            })
+            .catch(() => {});
+        },
+        onTaskUpdate: () => {
+          getAgentTask(dispatched.task_id)
+            .then((t) => {
+              setLiveTask(t);
+              setRefreshTick((n) => n + 1);
+            })
+            .catch(() => {});
+        },
+      });
+    } catch (err) {
+      setError(getErrorMessage(err));
+    } finally {
+      setNlDispatching(false);
+    }
+  };
 
   useEffect(() => {
     let active = true;
@@ -167,6 +287,90 @@ export default function CommandCenterPage() {
 
       <ErrorBanner error={error} onDismiss={() => setError(null)} />
       <SuccessBanner message={notice} onDismiss={() => setNotice(null)} />
+
+      {/* Unified Natural-Language Command Bar */}
+      <SectionCard
+        title="Ask ReleaseGuard AI"
+        subtitle="Submit any release engineering request — ReleaseGuardSupervisor routes to pr_agent, flag_agent, or experiment_agent with PolicyEngine gating."
+      >
+        <form onSubmit={handleDispatchPrompt} className="space-y-3">
+          <div className="flex flex-wrap gap-1.5">
+            {INTENT_EXAMPLES.map((ex) => (
+              <button
+                key={ex.label}
+                type="button"
+                onClick={() => setNlPrompt(ex.prompt)}
+                className="rounded-full border border-slate-700/80 bg-slate-900/90 px-2.5 py-1 text-[11px] font-medium text-slate-300 hover:border-indigo-500/50 hover:text-indigo-200"
+              >
+                {ex.label}
+              </button>
+            ))}
+          </div>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <input
+              type="text"
+              value={nlPrompt}
+              onChange={(e) => setNlPrompt(e.target.value)}
+              placeholder="e.g. Explain which feature flags user_123 receives in development, or review PR #12..."
+              className="flex-1 rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none"
+            />
+            <select
+              value={nlEnv}
+              onChange={(e) => setNlEnv(e.target.value)}
+              className="rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-200"
+            >
+              <option value="development">development</option>
+              <option value="staging">staging</option>
+              <option value="production">production (Cat C gated)</option>
+            </select>
+            <button
+              type="submit"
+              disabled={nlDispatching || !nlPrompt.trim()}
+              className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-500 disabled:opacity-50"
+            >
+              <Play className="h-3.5 w-3.5" />
+              {nlDispatching ? "Dispatching..." : "Run Agent"}
+            </button>
+          </div>
+        </form>
+
+        {liveTask && (
+          <div className="mt-4 rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-3 space-y-2 text-xs">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="font-mono font-semibold text-indigo-300">
+                  {liveTask.specialist}
+                </span>
+                <span className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 font-mono text-[10px] text-slate-200">
+                  {mapExecutionStateLabel(liveTask.status)}
+                </span>
+              </div>
+              <Link
+                href={`/agent`}
+                className="inline-flex items-center gap-1 text-indigo-300 hover:text-indigo-200"
+              >
+                Open Full Trace <ArrowRight className="h-3 w-3" />
+              </Link>
+            </div>
+            <p className="text-slate-300">{liveTask.user_prompt}</p>
+            {liveTask.final_response && (
+              <div className="rounded-lg border border-slate-800 bg-slate-950/80 p-2.5 text-slate-200 whitespace-pre-wrap">
+                {liveTask.final_response}
+              </div>
+            )}
+            {liveTask.pending_approvals && liveTask.pending_approvals.length > 0 && (
+              <div className="flex items-center justify-between rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-amber-200">
+                <span>
+                  Human approval required ({liveTask.pending_approvals.length} pending gate)
+                </span>
+                <Link href="/approvals" className="font-semibold underline">
+                  Review in Approvals
+                </Link>
+              </div>
+            )}
+          </div>
+        )}
+      </SectionCard>
 
       {/* Operational KPIs */}
       {overview && (

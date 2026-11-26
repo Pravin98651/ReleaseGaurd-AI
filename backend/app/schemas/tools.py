@@ -472,6 +472,38 @@ class ProposeReleaseActionOutput(BaseModel):
 # Registry Mapping All 34 Tools
 # ==============================================================================
 
+class FlagsmithExplainIdentityInput(BaseModel):
+    identifier: str = Field(min_length=1, max_length=128)
+    environment_name: str = Field(default="development", min_length=1, max_length=64)
+    traits: dict[str, Any] = Field(default_factory=dict)
+
+
+class FlagsmithExplainIdentityOutput(BaseModel):
+    identifier: str
+    environment_name: str
+    consistent_on_repeat_evaluation: bool
+    flag_explanations: list[dict[str, Any]] = Field(default_factory=list)
+    markdown_summary: str = ""
+    evidence_note: str = ""
+
+
+class PlanFeatureRequestRolloutInput(BaseModel):
+    prompt: str = Field(min_length=8, max_length=4000)
+    environment_name: str = Field(default="development", min_length=1, max_length=64)
+    repository_id: UUID | None = None
+    create_release: bool = True
+
+
+class PlanFeatureRequestRolloutOutput(BaseModel):
+    recommended_flag_key: str
+    flag_type: str
+    control_variation: str
+    treatment_variation: str
+    release_id: str | None = None
+    release_key: str | None = None
+    evidence_class: str = "AI_INFERRED"
+
+
 TOOL_INPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     # pr_agent (11)
     "github_list_repositories": GitHubListRepositoriesInput,
@@ -499,6 +531,8 @@ TOOL_INPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     "flagsmith_verify_live_state": FlagsmithVerifyLiveStateInput,
     "scan_flag_health": ScanFlagHealthInput,
     "flagsmith_delete_or_archive_flag": FlagsmithDeleteOrArchiveFlagInput,
+    "flagsmith_explain_identity": FlagsmithExplainIdentityInput,
+    "plan_feature_request_rollout": PlanFeatureRequestRolloutInput,
     # experiment_agent (10)
     "flagsmith_probe_experiment_capability": FlagsmithProbeExperimentCapabilityInput,
     "create_experiment_plan": CreateExperimentPlanInput,
@@ -537,6 +571,8 @@ TOOL_OUTPUT_SCHEMAS: dict[str, type[BaseModel]] = {
     "flagsmith_verify_live_state": FlagsmithVerifyLiveStateOutput,
     "scan_flag_health": ScanFlagHealthOutput,
     "flagsmith_delete_or_archive_flag": FlagsmithDeleteOrArchiveFlagOutput,
+    "flagsmith_explain_identity": FlagsmithExplainIdentityOutput,
+    "plan_feature_request_rollout": PlanFeatureRequestRolloutOutput,
     "flagsmith_probe_experiment_capability": FlagsmithProbeExperimentCapabilityOutput,
     "create_experiment_plan": CreateExperimentPlanOutput,
     "activate_experiment": ActivateExperimentOutput,

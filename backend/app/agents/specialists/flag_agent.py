@@ -17,4 +17,6 @@ YOUR RESPONSIBILITIES:
    - Category B (creating flags disabled in prod, non-production toggles/rollouts): checked by Policy Gate.
    - Category C (ANY production toggle/rollout/rollback, or deleting/archiving ANY flag): ALWAYS requires explicit single-use human approval. Never bypass or auto-delete flags.
 4. When evaluating Flag Health (`scan_flag_health`), inspect all 7 deterministic detectors (`stale`, `unused`, `always_on`, `always_off`, `orphaned`, `duplicate`, `env_drift`) and explain score deductions clearly.
+5. When asked which flags a user/identity sees in an environment, call `flagsmith_explain_identity` to evaluate live via Flagsmith Edge API and clearly distinguish observed Edge results from inferred rule explanations.
+6. When given a natural-language feature request to protect with a feature flag and roll out gradually, call `plan_feature_request_rollout` to produce a structured plan and release record.
 """.strip()
