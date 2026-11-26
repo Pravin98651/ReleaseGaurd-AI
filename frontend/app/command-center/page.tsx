@@ -6,6 +6,7 @@ import {
   Activity,
   ArrowRight,
   Bot,
+  Lock,
   Pause,
   Play,
   RefreshCw,
@@ -132,8 +133,14 @@ export default function CommandCenterPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Autonomous Release Command Center"
-        description="Real-time observability, tool-call inspection, evidence-backed decisions, and human-supervised execution controls."
+        title="AI Command Center"
+        description="Inspect user instructions, supervisor decisions, specialist selection, proposed tools, policy gates, tool results, approval interrupts, and final AI responses."
+        badge={
+          <span className="inline-flex items-center gap-1 rounded-full border border-indigo-500/35 bg-indigo-500/10 px-2.5 py-0.5 text-[11px] font-medium text-indigo-300">
+            <Lock className="h-3 w-3" />
+            Hidden CoT Redacted
+          </span>
+        }
         actions={
           <div className="flex items-center gap-2">
             <span
@@ -203,8 +210,8 @@ export default function CommandCenterPage() {
 
       {/* Active Executions */}
       <SectionCard
-        title={`Active & Paused Executions (${activeExecutions.length})`}
-        subtitle="Currently running, waiting for approval, or paused agent workflows"
+        title={`Active & Approval-Gated Executions (${activeExecutions.length})`}
+        subtitle="Currently running, waiting for human approval, or paused agent workflows"
       >
         {loading ? (
           <LoadingSkeleton rows={3} />
@@ -212,14 +219,18 @@ export default function CommandCenterPage() {
           <EmptyState
             icon={<Bot className="h-5 w-5" />}
             title="No active agent executions"
-            description="Start an AI Agent session or trigger PR analysis from a Release to observe live execution."
+            description="Start an AI-powered release from the Dashboard or trigger PR analysis from a Release to observe live execution."
           />
         ) : (
           <div className="grid gap-3 lg:grid-cols-2">
             {activeExecutions.map((exe) => (
               <div
                 key={exe.id}
-                className="rounded-xl border border-slate-800 bg-[#0d1119] p-4 space-y-3"
+                className={`rounded-xl border p-4 space-y-3 ${
+                  exe.status === "waiting_for_approval"
+                    ? "border-amber-500/45 bg-amber-500/5"
+                    : "border-slate-800 bg-[#0d1119]"
+                }`}
               >
                 <div className="flex flex-wrap items-start justify-between gap-2">
                   <div>
@@ -231,11 +242,19 @@ export default function CommandCenterPage() {
                       {exe.task_name}
                     </Link>
                     <div className="mt-0.5 text-[11px] text-slate-400">
-                      {exe.agent_name} · stage: {exe.current_stage || "—"}
+                      Specialist: <span className="text-slate-200">{exe.agent_name}</span> ({exe.agent_type}) · stage:{" "}
+                      {exe.current_stage || "—"}
                     </div>
                   </div>
                   <StatusBadge status={exe.status} />
                 </div>
+
+                {exe.task_description && (
+                  <p className="line-clamp-2 rounded-lg border border-slate-800/80 bg-[#090c12] px-2.5 py-1.5 text-[11px] text-slate-300">
+                    <span className="font-semibold text-slate-400">Instruction: </span>
+                    {exe.task_description}
+                  </p>
+                )}
 
                 {exe.current_activity && (
                   <p className="text-xs text-slate-300">{exe.current_activity}</p>
@@ -246,7 +265,6 @@ export default function CommandCenterPage() {
                     {exe.total_steps
                       ? `${exe.completed_steps}/${exe.total_steps} steps`
                       : `stage: ${exe.current_stage || "active"}`}
-                    {" · "}v{exe.version}
                   </span>
                   <div className="flex flex-wrap items-center gap-1.5">
                     {exe.status === "paused" ? (
@@ -301,7 +319,7 @@ export default function CommandCenterPage() {
                       href={`/command-center/${exe.id}`}
                       className="inline-flex items-center gap-1 rounded border border-indigo-500/40 bg-indigo-500/10 px-2 py-1 text-[11px] text-indigo-200 hover:bg-indigo-500/20"
                     >
-                      Inspect
+                      Inspect Trace
                       <ArrowRight className="h-3 w-3" />
                     </Link>
                   </div>
@@ -315,7 +333,7 @@ export default function CommandCenterPage() {
       {/* Searchable Execution History */}
       <SectionCard
         title={`Execution History (${total})`}
-        subtitle="Filterable audit trail across all agent runs"
+        subtitle="Filterable audit trail across all supervised agent runs"
       >
         <div className="mb-4 grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
           <div className="relative">
@@ -334,7 +352,7 @@ export default function CommandCenterPage() {
             aria-label="Filter by agent type"
             className="rounded-lg border border-slate-700 bg-[#0d1119] px-2.5 py-1.5 text-xs text-slate-100"
           >
-            <option value="">All Agent Types</option>
+            <option value="">All Specialists</option>
             <option value="pr_agent">pr_agent</option>
             <option value="flag_agent">flag_agent</option>
             <option value="experiment_agent">experiment_agent</option>
@@ -379,7 +397,7 @@ export default function CommandCenterPage() {
               <thead>
                 <tr className="border-b border-slate-800 text-[11px] uppercase tracking-wider text-slate-400">
                   <th className="py-2 pr-3">Execution</th>
-                  <th className="py-2 pr-3">Agent</th>
+                  <th className="py-2 pr-3">Specialist</th>
                   <th className="py-2 pr-3">Status</th>
                   <th className="py-2 pr-3">Stage</th>
                   <th className="py-2 pr-3">Duration</th>

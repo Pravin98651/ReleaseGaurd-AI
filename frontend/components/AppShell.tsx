@@ -12,6 +12,8 @@ import {
   Building2,
   CalendarClock,
   CheckSquare,
+  ChevronDown,
+  ChevronRight,
   ExternalLink,
   Flag,
   FlaskConical,
@@ -29,6 +31,7 @@ import {
   ServerCog,
   Settings,
   ShieldCheck,
+  Sparkles,
   Sun,
   UserCheck,
   X,
@@ -38,6 +41,7 @@ import { DEMO_APP_URL, logoutSession } from "@/lib/api";
 import { useControlPlaneStatus } from "@/hooks/use-control-plane-status";
 import { AuthGate } from "@/components/AuthGate";
 import { NotificationBell } from "@/components/NotificationBell";
+import { DEMO_PATH_STEPS, DemoPathBar, isDemoStepActive } from "@/components/DemoPathBar";
 
 interface NavItem {
   href: string;
@@ -53,7 +57,7 @@ const NAV_ITEMS: NavItem[] = [
   { href: "/intelligence", label: "Release Intelligence", icon: Brain, group: "overview" },
   { href: "/organization", label: "Organization Hub", icon: Building2, group: "overview" },
   { href: "/notifications", label: "Notifications", icon: Bell, group: "overview" },
-  { href: "/command-center", label: "Command Center", icon: Activity, group: "delivery" },
+  { href: "/command-center", label: "AI Command Center", icon: Activity, group: "delivery" },
   { href: "/risk-intelligence", label: "Risk Intelligence", icon: ShieldCheck, group: "delivery" },
   { href: "/progressive-delivery", label: "Progressive Delivery", icon: GitBranch, group: "delivery" },
   { href: "/agent", label: "AI Agent", icon: Bot, group: "delivery" },
@@ -118,6 +122,7 @@ function HealthPill({
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(true);
   const [theme, setTheme] = useState<"dark" | "light">(() => {
     if (typeof window !== "undefined") {
       return window.localStorage.getItem("rg_theme") === "light" ? "light" : "dark";
@@ -172,53 +177,133 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
       {/* Navigation */}
       <nav className="flex-1 space-y-5 overflow-y-auto px-3 py-4">
-        {(["overview", "delivery", "governance", "system"] as const).map((group) => {
-          const items = NAV_ITEMS.filter((item) => item.group === group);
-          return (
-            <div key={group}>
-              <div className="mb-1.5 px-2.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">
-                {GROUP_LABELS[group]}
-              </div>
-              <div className="space-y-0.5">
-                {items.map((item) => {
-                  const Icon = item.icon;
-                  const active =
-                    pathname === item.href || pathname.startsWith(`${item.href}/`);
-                  return (
-                    <Link
-                      key={item.href}
-                      href={item.href}
-                      onClick={() => setMobileOpen(false)}
+        {/* Highlighted 6-Screen 5-Minute Demo Path */}
+        <div className="rounded-xl border border-indigo-500/30 bg-indigo-500/5 p-2">
+          <div className="mb-1.5 flex items-center justify-between px-1.5">
+            <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-widest text-indigo-300">
+              <Sparkles className="h-3 w-3" />
+              5-Minute Demo Path
+            </span>
+            <span className="rounded bg-indigo-500/20 px-1.5 py-0.5 font-mono text-[9px] font-semibold text-indigo-200">
+              6 Steps
+            </span>
+          </div>
+          <div className="space-y-0.5">
+            {DEMO_PATH_STEPS.map((step) => {
+              const Icon = step.icon;
+              const active = isDemoStepActive(pathname, step);
+              const showBadge = step.step === 5 && pendingApprovalsCount > 0;
+              return (
+                <Link
+                  key={`demo-${step.step}`}
+                  href={step.href}
+                  onClick={() => setMobileOpen(false)}
+                  className={cn(
+                    "group flex items-center justify-between rounded-lg px-2 py-1.5 text-xs font-medium transition-colors",
+                    active
+                      ? "border border-indigo-500/40 bg-indigo-500/20 text-indigo-100"
+                      : "border border-transparent text-slate-300 hover:bg-slate-800/60 hover:text-slate-100"
+                  )}
+                >
+                  <span className="flex min-w-0 items-center gap-2">
+                    <span
                       className={cn(
-                        "group flex items-center justify-between rounded-lg px-2.5 py-2 text-xs font-medium transition-colors",
+                        "inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[10px] font-bold tabular-nums",
                         active
-                          ? "bg-indigo-500/15 text-indigo-200 border border-indigo-500/30"
-                          : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-100 border border-transparent"
+                          ? "bg-indigo-500 text-white"
+                          : "bg-slate-800 text-slate-300 group-hover:bg-slate-700"
                       )}
                     >
-                      <span className="flex items-center gap-2.5">
-                        <Icon
-                          className={cn(
-                            "h-4 w-4 transition-colors",
-                            active
-                              ? "text-indigo-400"
-                              : "text-slate-500 group-hover:text-slate-300"
-                          )}
-                        />
-                        <span>{item.label}</span>
-                      </span>
-                      {item.showApprovalsBadge && pendingApprovalsCount > 0 && (
-                        <span className="inline-flex min-w-5 items-center justify-center rounded-full border border-amber-500/40 bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-200 tabular-nums">
-                          {pendingApprovalsCount}
-                        </span>
+                      {step.step}
+                    </span>
+                    <Icon
+                      className={cn(
+                        "h-3.5 w-3.5 shrink-0 transition-colors",
+                        active
+                          ? "text-indigo-300"
+                          : "text-slate-400 group-hover:text-slate-200"
                       )}
-                    </Link>
-                  );
-                })}
-              </div>
+                    />
+                    <span className="truncate">{step.label}</span>
+                  </span>
+                  {showBadge && (
+                    <span className="ml-1 inline-flex min-w-4 items-center justify-center rounded-full border border-amber-500/40 bg-amber-500/20 px-1 py-0.5 text-[10px] font-bold text-amber-200 tabular-nums">
+                      {pendingApprovalsCount}
+                    </span>
+                  )}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* All Advanced Control Plane Pages */}
+        <div>
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen((prev) => !prev)}
+            className="mb-2 flex w-full items-center justify-between px-2.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500 hover:text-slate-300"
+          >
+            <span>All Control Plane Pages</span>
+            {advancedOpen ? (
+              <ChevronDown className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronRight className="h-3.5 w-3.5" />
+            )}
+          </button>
+
+          {advancedOpen && (
+            <div className="space-y-4">
+              {(["overview", "delivery", "governance", "system"] as const).map((group) => {
+                const items = NAV_ITEMS.filter((item) => item.group === group);
+                return (
+                  <div key={group}>
+                    <div className="mb-1 px-2.5 text-[10px] font-semibold uppercase tracking-widest text-slate-500">
+                      {GROUP_LABELS[group]}
+                    </div>
+                    <div className="space-y-0.5">
+                      {items.map((item) => {
+                        const Icon = item.icon;
+                        const active =
+                          pathname === item.href || pathname.startsWith(`${item.href}/`);
+                        return (
+                          <Link
+                            key={item.href}
+                            href={item.href}
+                            onClick={() => setMobileOpen(false)}
+                            className={cn(
+                              "group flex items-center justify-between rounded-lg px-2.5 py-1.5 text-xs font-medium transition-colors",
+                              active
+                                ? "bg-indigo-500/15 text-indigo-200 border border-indigo-500/30"
+                                : "text-slate-400 hover:bg-slate-800/60 hover:text-slate-100 border border-transparent"
+                            )}
+                          >
+                            <span className="flex items-center gap-2.5">
+                              <Icon
+                                className={cn(
+                                  "h-3.5 w-3.5 transition-colors",
+                                  active
+                                    ? "text-indigo-400"
+                                    : "text-slate-500 group-hover:text-slate-300"
+                                )}
+                              />
+                              <span>{item.label}</span>
+                            </span>
+                            {item.showApprovalsBadge && pendingApprovalsCount > 0 && (
+                              <span className="inline-flex min-w-5 items-center justify-center rounded-full border border-amber-500/40 bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-bold text-amber-200 tabular-nums">
+                                {pendingApprovalsCount}
+                              </span>
+                            )}
+                          </Link>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
             </div>
-          );
-        })}
+          )}
+        </div>
       </nav>
 
       {/* Sidebar footer: health pills + Demo Storefront link */}
@@ -371,6 +456,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
         <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 sm:px-6 lg:px-8">
           <AuthGate authStatus={authStatus} onAuthenticated={refresh}>
+            <DemoPathBar pendingApprovalsCount={pendingApprovalsCount} />
             {children}
           </AuthGate>
         </main>

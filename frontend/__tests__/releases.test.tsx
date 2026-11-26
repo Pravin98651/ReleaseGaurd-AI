@@ -153,7 +153,7 @@ describe("Autonomous Release Lifecycle UI", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/REL-2026-0001: Checkout v2 Release/)).toBeInTheDocument();
-      expect(screen.getByText("Draft & Scope")).toBeInTheDocument();
+      expect(screen.getAllByText("PR Analysis").length).toBeGreaterThan(0);
       expect(screen.getByText("Human Approval Gate")).toBeInTheDocument();
       expect(screen.getByText("Evaluate Readiness")).toBeInTheDocument();
     });

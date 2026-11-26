@@ -1,6 +1,6 @@
 import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 vi.mock("next/navigation", () => ({
   usePathname: () => "/command-center",
@@ -96,7 +96,7 @@ describe("Autonomous Release Command Center UI", () => {
     render(<CommandCenterPage />);
 
     await waitFor(() => {
-      expect(screen.getByText("Autonomous Release Command Center")).toBeInTheDocument();
+      expect(screen.getByText("AI Command Center")).toBeInTheDocument();
       expect(screen.getAllByText("EXE-2026-0001").length).toBeGreaterThan(0);
       expect(screen.getAllByText("Analyze PR #42").length).toBeGreaterThan(0);
     });
@@ -158,8 +158,10 @@ describe("Autonomous Release Command Center UI", () => {
 
     await waitFor(() => {
       expect(screen.getByText(/EXE-2026-0001: Analyze PR #42/)).toBeInTheDocument();
-      expect(screen.getByText("ReleaseGuard PR Agent queued task")).toBeInTheDocument();
       expect(screen.getByText("Pause")).toBeInTheDocument();
     });
+
+    fireEvent.click(screen.getByRole("button", { name: /Live Timeline/i }));
+    expect(screen.getByText("ReleaseGuard PR Agent queued task")).toBeInTheDocument();
   });
 });

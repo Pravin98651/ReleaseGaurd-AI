@@ -6,13 +6,18 @@ import { useParams } from "next/navigation";
 import {
   Activity,
   ArrowLeft,
+  Bot,
   Clock,
+  Lock,
+  MessageSquare,
   Pause,
   Play,
   RefreshCw,
   RotateCcw,
+  ShieldAlert,
   ShieldCheck,
   Terminal,
+  Wrench,
   XCircle,
 } from "lucide-react";
 import {
@@ -43,6 +48,14 @@ const SOURCE_LABELS: Record<string, string> = {
   human_decision: "Human Decision",
 };
 
+function summarizeJson(obj: Record<string, unknown> | undefined | null): string {
+  if (!obj || Object.keys(obj).length === 0) return "—";
+  const entries = Object.entries(obj)
+    .slice(0, 4)
+    .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
+  return entries.join(" · ");
+}
+
 export default function ExecutionDetailPage() {
   const params = useParams<{ executionId: string }>();
   const executionId = params?.executionId ?? "";
@@ -52,9 +65,9 @@ export default function ExecutionDetailPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [tab, setTab] = useState<"timeline" | "tools" | "decisions" | "approvals" | "checkpoints">(
-    "timeline",
-  );
+  const [tab, setTab] = useState<
+    "overview" | "timeline" | "tools" | "decisions" | "approvals" | "checkpoints"
+  >("overview");
   const [traceFilter, setTraceFilter] = useState("");
   const [refreshTick, setRefreshTick] = useState(0);
 
@@ -92,6 +105,31 @@ export default function ExecutionDetailPage() {
     };
   }, [executionId]);
 
+  const activeAgentTaskId = detail?.execution.agent_task_id;
+  useEffect(() => {
+    if (!activeAgentTaskId || typeof EventSource === "undefined") return;
+    const taskEs = new EventSource(`${API_BASE_URL}/api/v1/agent/tasks/${activeAgentTaskId}/stream`, {
+      withCredentials: true,
+    });
+    const onTaskEvt = () => setRefreshTick((n) => n + 1);
+    const events = [
+      "task.started",
+      "agent.thinking",
+      "agent.tool_proposed",
+      "policy.evaluated",
+      "approval.required",
+      "tool.executed",
+      "agent.completed",
+      "task.failed",
+      "task.cancelled",
+    ];
+    events.forEach((ev) => taskEs.addEventListener(ev, onTaskEvt));
+    return () => {
+      events.forEach((ev) => taskEs.removeEventListener(ev, onTaskEvt));
+      taskEs.close();
+    };
+  }, [activeAgentTaskId]);
+
   const runControl = async (key: string, fn: () => Promise<unknown>, msg: string) => {
     setBusy(key);
     setError(null);
@@ -119,7 +157,7 @@ export default function ExecutionDetailPage() {
           href="/command-center"
           className="inline-flex items-center gap-1.5 text-xs text-indigo-300 hover:underline"
         >
-          <ArrowLeft className="h-3.5 w-3.5" /> Back to Command Center
+          <ArrowLeft className="h-3.5 w-3.5" /> Back to AI Command Center
         </Link>
       </div>
     );
@@ -136,12 +174,51 @@ export default function ExecutionDetailPage() {
       )
     : traces;
 
+  const userInstruction =
+    (typeof exe.execution_metadata?.user_instruction === "string" &&
+      exe.execution_metadata.user_instruction) ||
+    (typeof exe.execution_metadata?.prompt === "string" && exe.execution_metadata.prompt) ||
+    exe.task_description ||
+    exe.task_name;
+
+  const supervisorDecisions = decisions.filter(
+    (d) =>
+      d.decision_type.toLowerCase().includes("supervisor") ||
+      d.decision_type.toLowerCase().includes("route") ||
+      d.decision_type.toLowerCase().includes("plan") ||
+      d.decision_source === "ai_recommendation",
+  );
+
+  const policyTraces = traces.filter(
+    (t) =>
+      t.event_type === "policy.evaluated" ||
+      t.category.toLowerCase().includes("policy") ||
+      t.event_type.includes("policy"),
+  );
+
+  const deterministicPolicyDecisions = decisions.filter(
+    (d) => d.decision_source === "deterministic_rule",
+  );
+
+  const proposedToolTraces = traces.filter(
+    (t) => t.event_type === "agent.tool_proposed" || t.event_type.includes("tool_proposed"),
+  );
+
+  const finalAiResponse =
+    (typeof exe.execution_metadata?.final_response === "string" &&
+      exe.execution_metadata.final_response) ||
+    (typeof exe.execution_metadata?.final_answer === "string" &&
+      exe.execution_metadata.final_answer) ||
+    decisions.find((d) => d.decision_source === "ai_recommendation")?.recommendation ||
+    decisions.find((d) => d.decision_source === "ai_recommendation")?.decision_summary ||
+    null;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center gap-2 text-xs text-slate-400">
         <Link href="/command-center" className="inline-flex items-center gap-1 hover:text-slate-200">
           <ArrowLeft className="h-3.5 w-3.5" />
-          Command Center
+          AI Command Center
         </Link>
         <span>/</span>
         <span className="font-mono text-indigo-300">{exe.execution_key}</span>
@@ -149,7 +226,13 @@ export default function ExecutionDetailPage() {
 
       <PageHeader
         title={`${exe.execution_key}: ${exe.task_name}`}
-        description={`${exe.agent_name} (${exe.agent_type}) · correlation: ${exe.correlation_id} · v${exe.version}`}
+        description={`Specialist: ${exe.agent_name} (${exe.agent_type})`}
+        badge={
+          <span className="inline-flex items-center gap-1 rounded-full border border-indigo-500/35 bg-indigo-500/10 px-2.5 py-0.5 text-[11px] font-medium text-indigo-300">
+            <Lock className="h-3 w-3" />
+            Hidden CoT Redacted
+          </span>
+        }
         actions={
           <div className="flex flex-wrap items-center gap-2">
             {exe.release_id && (
@@ -284,39 +367,15 @@ export default function ExecutionDetailPage() {
         </div>
       </SectionCard>
 
-      {/* Planned / Completed Steps */}
-      {steps.length > 0 && (
-        <SectionCard title="Execution Stages">
-          <div className="grid gap-2.5 sm:grid-cols-2 lg:grid-cols-4">
-            {steps.map((st) => (
-              <div
-                key={st.id}
-                className="rounded-lg border border-slate-800 bg-[#0d1119] p-3 text-xs"
-              >
-                <div className="mb-1 flex items-center justify-between">
-                  <span className="font-mono text-[10px] text-slate-500">#{st.sequence}</span>
-                  <StatusBadge status={st.status} />
-                </div>
-                <div className="font-semibold text-slate-100">{st.step_name}</div>
-                {st.duration_ms !== null && st.duration_ms !== undefined && (
-                  <div className="mt-1 font-mono text-[10px] text-slate-400">
-                    {st.duration_ms}ms
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </SectionCard>
-      )}
-
       {/* Inspector Tabs */}
       <div className="flex flex-wrap gap-2 border-b border-slate-800 pb-2 text-xs">
         {(
           [
+            ["overview", "AI Command Trace"],
             ["timeline", `Live Timeline (${traces.length})`],
             ["tools", `Tool Calls (${tool_calls.length})`],
             ["decisions", `Decisions & Evidence (${decisions.length})`],
-            ["approvals", `Human Decisions (${approvals.length})`],
+            ["approvals", `Approval Interrupts (${approvals.length})`],
             ["checkpoints", `Checkpoints (${checkpoints.length})`],
           ] as const
         ).map(([key, label]) => (
@@ -334,6 +393,248 @@ export default function ExecutionDetailPage() {
           </button>
         ))}
       </div>
+
+      {tab === "overview" && (
+        <div className="space-y-4 text-xs">
+          {/* 1. User Instruction & 3. Specialist Selected */}
+          <div className="grid gap-4 lg:grid-cols-3">
+            <SectionCard title="1. User Instruction" className="lg:col-span-2">
+              <p className="rounded-lg border border-slate-800 bg-[#0d1119] p-3 text-slate-200">
+                {userInstruction}
+              </p>
+            </SectionCard>
+
+            <SectionCard title="3. Specialist Selected">
+              <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-3 space-y-1.5">
+                <div className="flex items-center gap-2 font-semibold text-slate-100">
+                  <Bot className="h-4 w-4 text-indigo-400" />
+                  <span>{exe.agent_name}</span>
+                </div>
+                <div className="font-mono text-[11px] text-indigo-300">{exe.agent_type}</div>
+                <div className="text-[11px] text-slate-400">Mode: {exe.execution_mode}</div>
+              </div>
+            </SectionCard>
+          </div>
+
+          {/* 2. Supervisor Decisions */}
+          <SectionCard
+            title={`2. Supervisor Decisions (${supervisorDecisions.length})`}
+            subtitle="Routing, planning, and structured recommendations (no hidden chain-of-thought)"
+          >
+            {supervisorDecisions.length === 0 ? (
+              <p className="text-slate-400">
+                {steps.length > 0
+                  ? `Routed to ${exe.agent_name} across ${steps.length} execution step(s).`
+                  : "No supervisor routing decisions recorded yet."}
+              </p>
+            ) : (
+              <div className="space-y-2">
+                {supervisorDecisions.map((dec) => (
+                  <div
+                    key={dec.id}
+                    className="rounded-lg border border-slate-800 bg-[#0d1119] p-3 space-y-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-slate-100">{dec.decision_type}</span>
+                      <StatusBadge status={dec.decision_status} />
+                    </div>
+                    <p className="text-slate-300">{dec.decision_summary}</p>
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+
+          {/* 4. Proposed Tools & 5. Policy Decisions */}
+          <div className="grid gap-4 lg:grid-cols-2">
+            <SectionCard
+              title={`4. Proposed Tools (${proposedToolTraces.length || tool_calls.length})`}
+              subtitle="Tools proposed by the selected specialist before execution"
+            >
+              {proposedToolTraces.length > 0 ? (
+                <div className="space-y-2">
+                  {proposedToolTraces.map((tr) => (
+                    <div
+                      key={tr.id}
+                      className="flex items-center justify-between rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-2"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Wrench className="h-3.5 w-3.5 text-sky-400" />
+                        <span className="text-slate-200">{tr.message}</span>
+                      </div>
+                      <span className="font-mono text-[10px] text-slate-500">
+                        {formatTimestamp(tr.created_at)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : tool_calls.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {tool_calls.map((tc) => (
+                    <span
+                      key={tc.id}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-[#0d1119] px-2.5 py-1 font-mono text-[11px] text-slate-200"
+                    >
+                      <Wrench className="h-3 w-3 text-sky-400" />
+                      {tc.tool_name} ({tc.tool_category})
+                    </span>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-slate-400">No tools proposed yet.</p>
+              )}
+            </SectionCard>
+
+            <SectionCard
+              title={`5. Policy Decisions (${policyTraces.length + deterministicPolicyDecisions.length + approvals.length})`}
+              subtitle="Deterministic Category A/B/C/DENY policy evaluations"
+            >
+              {policyTraces.length === 0 &&
+              deterministicPolicyDecisions.length === 0 &&
+              approvals.length === 0 ? (
+                <p className="text-slate-400">No policy gate evaluations recorded yet.</p>
+              ) : (
+                <div className="space-y-2">
+                  {policyTraces.map((tr) => (
+                    <div
+                      key={tr.id}
+                      className="rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-2 text-slate-200"
+                    >
+                      <ShieldCheck className="mr-1.5 inline h-3.5 w-3.5 text-emerald-400" />
+                      {tr.message}
+                    </div>
+                  ))}
+                  {deterministicPolicyDecisions.map((dec) => (
+                    <div
+                      key={dec.id}
+                      className="rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-2 text-slate-200"
+                    >
+                      <span className="font-semibold">{dec.decision_type}:</span>{" "}
+                      {dec.decision_summary}
+                    </div>
+                  ))}
+                  {approvals.map((app) => (
+                    <div
+                      key={app.id}
+                      className="flex items-center justify-between rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2"
+                    >
+                      <span className="text-slate-200">
+                        Category {app.policy_category}: {app.title}
+                      </span>
+                      <StatusBadge status={app.status} />
+                    </div>
+                  ))}
+                </div>
+              )}
+            </SectionCard>
+          </div>
+
+          {/* 6. Actual Tool Results */}
+          <SectionCard
+            title={`6. Actual Tool Results (${tool_calls.length})`}
+            subtitle="Verified inputs, outputs, and execution latency from executed tools"
+          >
+            {tool_calls.length === 0 ? (
+              <p className="text-slate-400">No tool executions recorded yet.</p>
+            ) : (
+              <div className="space-y-2.5">
+                {tool_calls.map((tc) => (
+                  <div
+                    key={tc.id}
+                    className="rounded-lg border border-slate-800 bg-[#0d1119] p-3 space-y-1.5"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <Terminal className="h-3.5 w-3.5 text-sky-400" />
+                        <span className="font-mono font-semibold text-slate-100">
+                          {tc.tool_name}
+                        </span>
+                        <span className="rounded border border-slate-700 px-1.5 py-0.5 text-[10px] text-slate-400">
+                          {tc.tool_category}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {tc.duration_ms !== null && tc.duration_ms !== undefined && (
+                          <span className="font-mono text-[11px] text-slate-400">
+                            {tc.duration_ms}ms
+                          </span>
+                        )}
+                        <StatusBadge status={tc.status} />
+                      </div>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2 text-[11px]">
+                      <div className="rounded bg-[#090c12] px-2.5 py-1.5 text-slate-300">
+                        <span className="font-semibold text-slate-400">Input: </span>
+                        {summarizeJson(tc.input_summary)}
+                      </div>
+                      <div className="rounded bg-[#090c12] px-2.5 py-1.5 text-slate-300">
+                        <span className="font-semibold text-slate-400">Result: </span>
+                        {summarizeJson(tc.output_summary)}
+                      </div>
+                    </div>
+                    {tc.error_message && (
+                      <div className="rounded border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-rose-200">
+                        {tc.error_code ? `${tc.error_code}: ` : ""}
+                        {tc.error_message}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </SectionCard>
+
+          {/* 7. Approval Interrupts */}
+          <SectionCard
+            title={`7. Approval Interrupts (${approvals.length})`}
+            subtitle="Human-in-the-loop authorization gates pausing execution until approved or rejected"
+          >
+            {exe.status === "waiting_for_approval" && (
+              <div className="mb-3 flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-amber-200">
+                <ShieldAlert className="h-4 w-4 shrink-0" />
+                <span>
+                  Execution is paused at a human approval interrupt. Approve or reject below to resume.
+                </span>
+              </div>
+            )}
+            {approvals.length === 0 ? (
+              <p className="text-slate-400">No approval interrupts triggered for this execution.</p>
+            ) : (
+              <div className="space-y-3">
+                {approvals.map((app) => (
+                  <ApprovalActionCard
+                    key={app.id}
+                    approval={app}
+                    onUpdated={() => setRefreshTick((n) => n + 1)}
+                  />
+                ))}
+              </div>
+            )}
+          </SectionCard>
+
+          {/* 8. Final AI Response */}
+          <SectionCard
+            title="8. Final AI Response"
+            subtitle="Structured final output (hidden chain-of-thought is never exposed)"
+          >
+            {finalAiResponse ? (
+              <div className="rounded-lg border border-indigo-500/30 bg-indigo-500/5 p-3.5 text-slate-200">
+                <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold text-indigo-300">
+                  <MessageSquare className="h-3.5 w-3.5" />
+                  Final Response
+                </div>
+                <p className="leading-relaxed">{finalAiResponse}</p>
+              </div>
+            ) : (
+              <p className="text-slate-400">
+                {isTerminal
+                  ? "Execution finished without a separate final narrative."
+                  : "Execution in progress — final AI response will appear upon completion."}
+              </p>
+            )}
+          </SectionCard>
+        </div>
+      )}
 
       {tab === "timeline" && (
         <SectionCard
@@ -411,18 +712,20 @@ export default function ExecutionDetailPage() {
                       {tc.error_message}
                     </div>
                   )}
-                  <details className="text-[11px] text-slate-400">
-                    <summary className="cursor-pointer hover:text-slate-200">
-                      Redacted Input / Output
-                    </summary>
-                    <pre className="mt-2 overflow-x-auto rounded bg-[#090c12] p-2 text-[10px] text-slate-300">
-                      {JSON.stringify(
-                        { input: tc.input_summary, output: tc.output_summary },
-                        null,
-                        2,
-                      )}
-                    </pre>
-                  </details>
+                  <div className="grid gap-2 sm:grid-cols-2 text-[11px]">
+                    <div className="rounded bg-[#090c12] p-2 text-slate-300">
+                      <div className="mb-1 font-semibold text-slate-400">Input Summary</div>
+                      <pre className="overflow-x-auto text-[10px]">
+                        {JSON.stringify(tc.input_summary, null, 2)}
+                      </pre>
+                    </div>
+                    <div className="rounded bg-[#090c12] p-2 text-slate-300">
+                      <div className="mb-1 font-semibold text-slate-400">Output Summary</div>
+                      <pre className="overflow-x-auto text-[10px]">
+                        {JSON.stringify(tc.output_summary, null, 2)}
+                      </pre>
+                    </div>
+                  </div>
                 </div>
               ))}
             </div>
@@ -475,7 +778,7 @@ export default function ExecutionDetailPage() {
       {tab === "approvals" && (
         <div className="space-y-3">
           {approvals.length === 0 ? (
-            <SectionCard title="Human Decisions">
+            <SectionCard title="Approval Interrupts">
               <p className="text-xs text-slate-400">No approval gates linked to this execution.</p>
             </SectionCard>
           ) : (
@@ -492,10 +795,14 @@ export default function ExecutionDetailPage() {
 
       {tab === "checkpoints" && (
         <SectionCard title="Recoverable Checkpoints & Metadata">
-          <div className="mb-3 grid gap-2 sm:grid-cols-3 text-xs">
+          <div className="mb-3 grid gap-2 sm:grid-cols-4 text-xs">
             <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-2.5">
               <span className="text-slate-400">Correlation ID:</span>{" "}
               <span className="font-mono text-slate-200">{exe.correlation_id}</span>
+            </div>
+            <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-2.5">
+              <span className="text-slate-400">Version:</span>{" "}
+              <span className="font-mono text-slate-200">v{exe.version}</span>
             </div>
             <div className="rounded-lg border border-slate-800 bg-[#0d1119] p-2.5">
               <span className="text-slate-400">Retries:</span>{" "}

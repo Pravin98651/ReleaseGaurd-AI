@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Activity,
@@ -12,25 +12,47 @@ import {
   CalendarClock,
   CheckCircle2,
   CheckSquare,
+  ExternalLink,
+  FileText,
   Flag,
   FlaskConical,
   FolderGit2,
   GitPullRequest,
   HeartPulse,
+  Play,
   RefreshCw,
   Rocket,
   ShieldAlert,
+  ShieldCheck,
+  Sparkles,
+  Square,
+  Terminal,
+  Wrench,
 } from "lucide-react";
 import {
+  cancelAgentTask,
+  createAgentSession,
+  createRelease,
+  DEMO_APP_URL,
+  getAgentTask,
   getDashboardOverview,
   getErrorMessage,
   getSystemHealth,
   listApprovals,
+  listPullRequests,
+  listRepositories,
+  sendAgentMessage,
 } from "@/lib/api";
+import { subscribeToAgentTask } from "@/lib/sse";
 import type {
+  AgentStepEvent,
+  AgentTask,
   Approval,
   DashboardOverview,
   MetricTrend,
+  PullRequest,
+  ReleaseDetail,
+  Repository,
   SystemHealth,
   TimeRangePreset,
 } from "@/types/releaseguard";
@@ -40,12 +62,17 @@ import {
   ErrorBanner,
   LoadingSkeleton,
   MetricCard,
+  Modal,
   PageHeader,
   SectionCard,
 } from "@/components/ui/StatePrimitives";
 import { DashboardChartGrid } from "@/components/DashboardCharts";
 import { ApprovalActionCard } from "@/components/ApprovalActionCard";
+import { PolicyGateBadge } from "@/components/PolicyGateBadge";
 import { EnvironmentBadge, StatusBadge } from "@/components/StatusBadges";
+
+const NOVASHOP_DEMO_OBJECTIVE =
+  "Analyze the selected PR for checkout risk, verify Flagsmith flag coverage in development only, stage a 25% canary rollout with payment_failed guardrail monitoring, and prepare the release readiness report.";
 
 function TrendPill({ trend }: { trend?: MetricTrend | null }) {
   if (!trend || trend.percent_change === null || trend.percent_change === undefined) {
@@ -140,6 +167,64 @@ function DomainSummaryCard({
   );
 }
 
+function LiveStepRow({ step }: { step: AgentStepEvent }) {
+  const p = step.payload ?? {};
+  const labelMap: Record<string, { label: string; tone: string }> = {
+    "task.started": { label: "Started", tone: "text-indigo-300 border-indigo-500/30 bg-indigo-500/10" },
+    "agent.thinking": { label: "Routing", tone: "text-sky-300 border-sky-500/30 bg-sky-500/10" },
+    "agent.tool_proposed": { label: "Tool Proposed", tone: "text-cyan-300 border-cyan-500/30 bg-cyan-500/10" },
+    "policy.evaluated": { label: "Policy Gate", tone: "text-amber-300 border-amber-500/30 bg-amber-500/10" },
+    "approval.required": { label: "Approval Required", tone: "text-amber-200 border-amber-500/40 bg-amber-500/15" },
+    "tool.executed": { label: "Tool Executed", tone: "text-emerald-300 border-emerald-500/30 bg-emerald-500/10" },
+    "agent.completed": { label: "Completed", tone: "text-emerald-200 border-emerald-500/40 bg-emerald-500/15" },
+    "task.failed": { label: "Failed", tone: "text-rose-200 border-rose-500/40 bg-rose-500/15" },
+  };
+  const badge = labelMap[step.event_type] ?? {
+    label: step.event_type,
+    tone: "text-slate-300 border-slate-700 bg-slate-800",
+  };
+
+  return (
+    <div className="flex items-start justify-between gap-3 rounded-lg border border-slate-800/80 bg-[#0d1119] px-3 py-2 text-xs">
+      <div className="min-w-0 space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] text-slate-500">#{step.seq}</span>
+          <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold ${badge.tone}`}>
+            {badge.label}
+          </span>
+          {typeof p.specialist === "string" && (
+            <span className="font-mono text-[11px] text-indigo-300">{p.specialist}</span>
+          )}
+          {typeof p.tool_name === "string" && (
+            <span className="inline-flex items-center gap-1 font-mono text-[11px] text-cyan-300">
+              <Wrench className="h-3 w-3" />
+              {p.tool_name}
+            </span>
+          )}
+          {typeof p.category === "string" && (
+            <PolicyGateBadge category={p.category} />
+          )}
+        </div>
+        {typeof p.summary === "string" && (
+          <p className="text-[11px] text-slate-300">{p.summary}</p>
+        )}
+        {typeof p.reason === "string" && (
+          <p className="text-[11px] text-slate-400">{p.reason}</p>
+        )}
+        {typeof p.title === "string" && (
+          <p className="text-[11px] font-medium text-amber-200">{p.title}</p>
+        )}
+        {typeof p.error === "string" && (
+          <p className="text-[11px] text-rose-300">{p.error}</p>
+        )}
+      </div>
+      <span className="shrink-0 font-mono text-[10px] text-slate-500 tabular-nums">
+        {formatTimestamp(step.timestamp)}
+      </span>
+    </div>
+  );
+}
+
 export default function DashboardPage() {
   const [range, setRange] = useState<TimeRangePreset>("7d");
   const [startDate, setStartDate] = useState("");
@@ -152,6 +237,79 @@ export default function DashboardPage() {
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [pendingApprovals, setPendingApprovals] = useState<Approval[]>([]);
 
+  // Central Release Workspace state
+  const [repos, setRepos] = useState<Repository[]>([]);
+  const [selectedRepoId, setSelectedRepoId] = useState("");
+  const [pullRequests, setPullRequests] = useState<PullRequest[]>([]);
+  const [loadingPrs, setLoadingPrs] = useState(false);
+  const [selectedPrId, setSelectedPrId] = useState("");
+  const [targetEnv, setTargetEnv] = useState<"development" | "staging" | "production">("development");
+  const [objective, setObjective] = useState("");
+  const [launching, setLaunching] = useState(false);
+  const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [activeRelease, setActiveRelease] = useState<ReleaseDetail | null>(null);
+  const [activeTask, setActiveTask] = useState<AgentTask | null>(null);
+  const [liveSteps, setLiveSteps] = useState<AgentStepEvent[]>([]);
+  const [streamMode, setStreamMode] = useState<"idle" | "sse" | "polling" | "closed">("idle");
+
+  // Confirmation dialog state for sensitive actions
+  const [confirmAction, setConfirmAction] = useState<{
+    title: string;
+    subtitle: string;
+    description: string;
+    confirmLabel: string;
+    tone: "amber" | "rose" | "indigo";
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
+
+  const unsubRef = useRef<(() => void) | null>(null);
+
+  const attachTaskStream = useCallback((task: AgentTask) => {
+    if (unsubRef.current) {
+      unsubRef.current();
+      unsubRef.current = null;
+    }
+
+    const existingSteps = Array.isArray(task.steps_log) ? task.steps_log : [];
+    setLiveSteps(existingSteps);
+    setActiveTask(task);
+
+    if (
+      task.status === "completed" ||
+      task.status === "failed" ||
+      task.status === "cancelled"
+    ) {
+      setStreamMode("closed");
+      return;
+    }
+
+    const maxSeq = existingSteps.reduce((m, s) => Math.max(m, s.seq), 0);
+    unsubRef.current = subscribeToAgentTask(task.id, maxSeq, {
+      onModeChange: (mode) => setStreamMode(mode),
+      onStep: (step) => {
+        setLiveSteps((prev) => {
+          if (prev.some((s) => s.seq === step.seq)) return prev;
+          return [...prev, step].sort((a, b) => a.seq - b.seq);
+        });
+      },
+      onTaskUpdate: async (partial) => {
+        setActiveTask((prev) => (prev ? { ...prev, ...partial } : prev));
+        if (partial.status === "awaiting_approval" || partial.status === "completed") {
+          try {
+            const refreshed = await getAgentTask(task.id);
+            setActiveTask(refreshed);
+            if (Array.isArray(refreshed.steps_log) && refreshed.steps_log.length > 0) {
+              setLiveSteps(refreshed.steps_log);
+            }
+          } catch {
+            // Keep existing state if refresh fails
+          }
+        }
+      },
+      onError: (msg) => setWorkspaceError(msg),
+    });
+  }, []);
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -162,7 +320,7 @@ export default function DashboardPage() {
         end_date: range === "custom" && endDate ? endDate : undefined,
         environment: environment !== "all" ? environment : undefined,
       };
-      const [h, ov, appRes] = await Promise.all([
+      const [h, ov, appRes, repoRes] = await Promise.all([
         getSystemHealth(),
         getDashboardOverview(filters),
         listApprovals({ status: "pending", limit: 5 }).catch(() => ({
@@ -171,10 +329,21 @@ export default function DashboardPage() {
           limit: 5,
           offset: 0,
         })),
+        listRepositories({ limit: 50 }).catch(() => ({
+          items: [],
+          total: 0,
+          limit: 50,
+          offset: 0,
+        })),
       ]);
       setHealth(h);
       setOverview(ov);
       setPendingApprovals(appRes.items);
+      setRepos(repoRes.items);
+      setSelectedRepoId((prev) => {
+        if (prev && repoRes.items.some((r) => r.id === prev)) return prev;
+        return repoRes.items[0]?.id ?? "";
+      });
     } catch (err) {
       setError(getErrorMessage(err));
     } finally {
@@ -198,18 +367,222 @@ export default function DashboardPage() {
       clearTimeout(timer);
       if (debounceTimer) clearTimeout(debounceTimer);
       window.removeEventListener("rg:workspace-event", onWorkspaceEvent);
+      if (unsubRef.current) {
+        unsubRef.current();
+      }
     };
   }, [loadData]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      if (cancelled) return;
+      if (!selectedRepoId) {
+        setPullRequests([]);
+        setSelectedPrId("");
+        setLoadingPrs(false);
+        return;
+      }
+      setLoadingPrs(true);
+      void listPullRequests({ repository_id: selectedRepoId, limit: 50 })
+        .then((res) => {
+          if (cancelled) return;
+          setPullRequests(res.items);
+          const openPr = res.items.find((p) => p.state === "open") ?? res.items[0];
+          setSelectedPrId(openPr?.id ?? "");
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setPullRequests([]);
+            setSelectedPrId("");
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setLoadingPrs(false);
+        });
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [selectedRepoId]);
+
+  const executeWorkflowLaunch = async () => {
+    const trimmedObjective = objective.trim();
+    if (!trimmedObjective) {
+      setWorkspaceError("Enter a natural-language release objective before starting.");
+      return;
+    }
+    setLaunching(true);
+    setWorkspaceError(null);
+    try {
+      const selectedRepo = repos.find((r) => r.id === selectedRepoId) ?? null;
+      const selectedPr = pullRequests.find((p) => p.id === selectedPrId) ?? null;
+
+      // Best-effort create a tracked release record so the user gets a direct Final Release Report link
+      if (selectedRepo && selectedPr) {
+        try {
+          const release = await createRelease({
+            title: `AI Release: ${selectedPr.title}`.slice(0, 120),
+            description: trimmedObjective,
+            target_environment: targetEnv,
+            repository_id: selectedRepo.id,
+            pull_request_id: selectedPr.id,
+            target_rollout_percentage: 25,
+            ai_assist: true,
+          });
+          setActiveRelease(release);
+        } catch {
+          // Proceed with AI session even if release record creation is skipped or duplicated
+        }
+      }
+
+      const session = await createAgentSession({
+        title: selectedPr
+          ? `PR #${selectedPr.github_pr_number}: ${selectedPr.title}`.slice(0, 80)
+          : trimmedObjective.slice(0, 80),
+        context_scope: {
+          repository_id: selectedRepoId || undefined,
+          pull_request_id: selectedPrId || undefined,
+          environment: targetEnv,
+        },
+      });
+
+      const promptWithContext = selectedPr
+        ? `[Repository: ${selectedRepo?.full_name ?? selectedRepoId} | PR #${selectedPr.github_pr_number}: ${selectedPr.title} | Env: ${targetEnv}] ${trimmedObjective}`
+        : `[Env: ${targetEnv}] ${trimmedObjective}`;
+
+      const dispatch = await sendAgentMessage(session.id, {
+        content: promptWithContext,
+        specialist_hint: "supervisor",
+      });
+
+      const taskObj = await getAgentTask(dispatch.task_id).catch(
+        (): AgentTask => ({
+          id: dispatch.task_id,
+          session_id: session.id,
+          specialist: "supervisor",
+          user_prompt: promptWithContext,
+          status: "queued",
+          steps_log: [],
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+      );
+      attachTaskStream(taskObj);
+    } catch (err) {
+      setWorkspaceError(getErrorMessage(err));
+    } finally {
+      setLaunching(false);
+    }
+  };
+
+  const handleStartWorkflow = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!objective.trim()) {
+      setWorkspaceError("Enter a natural-language release objective before starting.");
+      return;
+    }
+    if (targetEnv !== "development") {
+      setConfirmAction({
+        title: `Confirm ${targetEnv.toUpperCase()} AI Release Workflow`,
+        subtitle: "Sensitive environment target",
+        description: `You are about to launch an AI-powered release workflow targeting "${targetEnv}". Category B/C mutations will still require explicit human approval, and no PRs will be auto-merged. Continue?`,
+        confirmLabel: `Start in ${targetEnv}`,
+        tone: targetEnv === "production" ? "rose" : "amber",
+        onConfirm: async () => {
+          setConfirmAction(null);
+          await executeWorkflowLaunch();
+        },
+      });
+      return;
+    }
+    void executeWorkflowLaunch();
+  };
+
+  const handleCancelActiveTask = () => {
+    if (!activeTask) return;
+    setConfirmAction({
+      title: "Cancel Active AI Release Task",
+      subtitle: `Task ${activeTask.id}`,
+      description:
+        "Cancelling stops the LangGraph supervisor stream immediately. Any already-executed Category A reads remain in the audit log.",
+      confirmLabel: "Cancel Task",
+      tone: "rose",
+      onConfirm: async () => {
+        setConfirmAction(null);
+        try {
+          const cancelled = await cancelAgentTask(activeTask.id);
+          setActiveTask(cancelled);
+          setStreamMode("closed");
+        } catch (err) {
+          setWorkspaceError(getErrorMessage(err));
+        }
+      },
+    });
+  };
+
+  const applyNovaShopDemoScenario = () => {
+    const apply = () => {
+      const novaRepo =
+        repos.find((r) => r.full_name.toLowerCase().includes("novashop")) ?? repos[0];
+      if (novaRepo) {
+        setSelectedRepoId(novaRepo.id);
+      }
+      setTargetEnv("development");
+      setObjective(NOVASHOP_DEMO_OBJECTIVE);
+      setWorkspaceError(null);
+    };
+
+    if (objective.trim() && objective.trim() !== NOVASHOP_DEMO_OBJECTIVE) {
+      setConfirmAction({
+        title: "Load NovaShop Demo Scenario",
+        subtitle: "Development environment only · Synthetic data",
+        description:
+          "This will replace your current release objective with the NovaShop development-only demo scenario and lock target environment to development. Production is never mutated.",
+        confirmLabel: "Load Demo Scenario",
+        tone: "indigo",
+        onConfirm: () => {
+          setConfirmAction(null);
+          apply();
+        },
+      });
+      return;
+    }
+    apply();
+  };
+
+  const handleTaskApprovalUpdated = async (updated: Approval) => {
+    if (!activeTask) return;
+    setActiveTask((prev) =>
+      prev
+        ? {
+            ...prev,
+            pending_approvals: (prev.pending_approvals ?? []).map((a) =>
+              a.id === updated.id ? updated : a
+            ),
+          }
+        : prev
+    );
+    const refreshed = await getAgentTask(activeTask.id).catch(() => null);
+    if (refreshed) {
+      attachTaskStream(refreshed);
+    }
+    void loadData();
+  };
 
   const m = overview?.metrics;
   const recentActivity = overview?.recent_activity ?? [];
   const pendingActions = overview?.pending_actions ?? [];
+  const taskPendingApprovals = (activeTask?.pending_approvals ?? []).filter(
+    (a) => a.status === "pending"
+  );
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Release Control Plane"
-        description="Real-time engineering activity, verified Flagsmith rollouts, Bayesian experiments, pending actions, and scheduled automation."
+        description="Central Release Workspace for AI-powered release orchestration, live SSE execution, NovaShop Demo Mode, and operational telemetry."
         actions={
           <div className="flex flex-wrap items-center gap-2">
             <select
@@ -257,13 +630,6 @@ export default function DashboardPage() {
               </div>
             )}
 
-            <Link
-              href="/agent"
-              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-400"
-            >
-              <Bot className="h-3.5 w-3.5" />
-              Open AI Engineer
-            </Link>
             <button
               type="button"
               onClick={() => void loadData()}
@@ -278,65 +644,470 @@ export default function DashboardPage() {
 
       <ErrorBanner error={error} onRetry={() => void loadData()} />
 
-      {/* Integration Status Bar */}
-      {health && (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-[#111622] px-4 py-3">
-            <div>
-              <div className="text-[11px] uppercase tracking-wider text-slate-400">
-                GitHub Integration
-              </div>
-              <div className="mt-0.5 text-sm font-medium text-slate-100">
-                {health.github_connected ? "Connected" : "Not Connected"}
-              </div>
-            </div>
-            <StatusBadge status={health.github_connected ? "connected" : "disconnected"} />
+      {health && (!health.github_connected || !health.flagsmith_connected) && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-200">
+          <div className="flex items-center gap-2.5">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+            <span>
+              Complete GitHub and Flagsmith setup in Settings to enable live PR analysis,
+              Draft PR creation, and Feature Versioning v2 rollouts.
+            </span>
           </div>
-
-          <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-[#111622] px-4 py-3">
-            <div>
-              <div className="text-[11px] uppercase tracking-wider text-slate-400">
-                Flagsmith Control
-              </div>
-              <div className="mt-0.5 text-sm font-medium text-slate-100">
-                {health.flagsmith_connected ? "Connected" : "Not Connected"}
-              </div>
-            </div>
-            <StatusBadge status={health.flagsmith_connected ? "connected" : "disconnected"} />
-          </div>
-
-          <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-[#111622] px-4 py-3">
-            <div>
-              <div className="text-[11px] uppercase tracking-wider text-slate-400">
-                Gemini Orchestrator
-              </div>
-              <div className="mt-0.5 text-sm font-medium text-slate-100">
-                {health.gemini_configured ? "Configured (AFC Off)" : "API Key Missing"}
-              </div>
-            </div>
-            <StatusBadge status={health.gemini_configured ? "ok" : "pending"} />
-          </div>
-
-          <div className="flex items-center justify-between rounded-xl border border-slate-800 bg-[#111622] px-4 py-3">
-            <div>
-              <div className="text-[11px] uppercase tracking-wider text-slate-400">
-                Experiment Analytics
-              </div>
-              <div className="mt-0.5 font-mono text-xs font-medium text-cyan-300">
-                {health.analytics_mode}
-              </div>
-            </div>
-            <Link
-              href="/settings"
-              className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-300 hover:text-white"
-            >
-              Configure
-            </Link>
-          </div>
+          <Link
+            href="/settings"
+            className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 font-semibold text-amber-100 hover:bg-amber-500/25"
+          >
+            Go to Settings
+          </Link>
         </div>
       )}
 
-      {/* Row 1: Primary Executive KPIs */}
+      {/* Hero Row: Central Release Workspace + NovaShop Demo Mode */}
+      <div className="grid gap-6 xl:grid-cols-12">
+        <SectionCard
+          className="xl:col-span-8"
+          title="Start an AI-powered release"
+          subtitle="Central Release Workspace — select a repository and PR, define your objective, and observe live LangGraph SSE execution."
+          actions={
+            <div className="flex items-center gap-2">
+              <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2.5 py-0.5 font-mono text-[11px] text-cyan-300">
+                Stream: {streamMode}
+              </span>
+              <Link
+                href={activeRelease ? `/releases/${activeRelease.release.id}` : "/releases"}
+                className="inline-flex items-center gap-1 rounded-lg border border-indigo-500/40 bg-indigo-500/15 px-2.5 py-1 text-xs font-semibold text-indigo-200 hover:bg-indigo-500/25"
+              >
+                <FileText className="h-3.5 w-3.5" />
+                Final Release Report
+              </Link>
+            </div>
+          }
+        >
+          <form onSubmit={handleStartWorkflow} className="space-y-4">
+            <ErrorBanner error={workspaceError} onDismiss={() => setWorkspaceError(null)} />
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div>
+                <label
+                  htmlFor="workspace-repo-select"
+                  className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-slate-400"
+                >
+                  Repository
+                </label>
+                <select
+                  id="workspace-repo-select"
+                  value={selectedRepoId}
+                  onChange={(e) => setSelectedRepoId(e.target.value)}
+                  className="w-full rounded-lg border border-slate-700 bg-[#0d1119] px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 focus:outline-none"
+                >
+                  {repos.length === 0 ? (
+                    <option value="">No connected repositories</option>
+                  ) : (
+                    repos.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.full_name}
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="workspace-pr-select"
+                  className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-slate-400"
+                >
+                  Pull Request
+                </label>
+                <select
+                  id="workspace-pr-select"
+                  value={selectedPrId}
+                  onChange={(e) => setSelectedPrId(e.target.value)}
+                  disabled={loadingPrs || pullRequests.length === 0}
+                  className="w-full rounded-lg border border-slate-700 bg-[#0d1119] px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 focus:outline-none disabled:opacity-60"
+                >
+                  {loadingPrs ? (
+                    <option value="">Loading PRs...</option>
+                  ) : pullRequests.length === 0 ? (
+                    <option value="">No synced PRs for repo</option>
+                  ) : (
+                    pullRequests.map((pr) => (
+                      <option key={pr.id} value={pr.id}>
+                        #{pr.github_pr_number} · {pr.title} ({pr.state})
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="workspace-env-select"
+                  className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-slate-400"
+                >
+                  Target Environment
+                </label>
+                <select
+                  id="workspace-env-select"
+                  value={targetEnv}
+                  onChange={(e) =>
+                    setTargetEnv(e.target.value as "development" | "staging" | "production")
+                  }
+                  className="w-full rounded-lg border border-slate-700 bg-[#0d1119] px-3 py-2 text-xs text-slate-100 focus:border-indigo-500 focus:outline-none"
+                >
+                  <option value="development">development (Safe Sandbox)</option>
+                  <option value="staging">staging (Confirmation Required)</option>
+                  <option value="production">production (Confirmation Required)</option>
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+                <label
+                  htmlFor="workspace-objective"
+                  className="text-[11px] font-semibold uppercase tracking-wider text-slate-400"
+                >
+                  Natural-Language Release Objective
+                </label>
+                <button
+                  type="button"
+                  onClick={() => setObjective(NOVASHOP_DEMO_OBJECTIVE)}
+                  className="text-[11px] font-medium text-indigo-300 hover:text-indigo-200"
+                >
+                  Use NovaShop checkout template
+                </button>
+              </div>
+              <textarea
+                id="workspace-objective"
+                rows={3}
+                value={objective}
+                onChange={(e) => setObjective(e.target.value)}
+                placeholder="Describe what the AI release supervisor should analyze, flag, experiment, or stage..."
+                className="w-full rounded-lg border border-slate-700 bg-[#0d1119] px-3 py-2 text-xs leading-relaxed text-slate-100 placeholder:text-slate-500 focus:border-indigo-500 focus:outline-none"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                <ShieldCheck className="h-3.5 w-3.5 text-emerald-400" />
+                <span>PolicyGate enforced · Category B/C mutations require human sign-off</span>
+              </div>
+              <div className="flex items-center gap-2">
+                {activeTask &&
+                  (activeTask.status === "running" ||
+                    activeTask.status === "queued" ||
+                    activeTask.status === "awaiting_approval") && (
+                    <button
+                      type="button"
+                      onClick={handleCancelActiveTask}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-rose-500/40 bg-rose-500/10 px-3 py-2 text-xs font-semibold text-rose-200 hover:bg-rose-500/20"
+                    >
+                      <Square className="h-3.5 w-3.5" />
+                      Cancel Task
+                    </button>
+                  )}
+                <button
+                  type="submit"
+                  disabled={launching}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-500 px-4 py-2 text-xs font-semibold text-white hover:bg-indigo-400 disabled:opacity-50"
+                >
+                  <Play className="h-3.5 w-3.5" />
+                  {launching ? "Starting Release..." : "Start AI-Powered Release"}
+                </button>
+              </div>
+            </div>
+          </form>
+
+          {/* Live SSE Execution & Inline Approvals */}
+          {activeTask && (
+            <div className="mt-5 space-y-3 border-t border-slate-800/80 pt-4">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Terminal className="h-4 w-4 text-indigo-400" />
+                  <span className="text-xs font-semibold text-slate-100">
+                    Live Execution Trace
+                  </span>
+                  <StatusBadge status={activeTask.status} />
+                  <span className="font-mono text-[11px] text-slate-400">
+                    Task {activeTask.id.slice(0, 8)}
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <Link
+                    href="/command-center"
+                    className="rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-indigo-300 hover:bg-slate-800"
+                  >
+                    Open AI Command Center →
+                  </Link>
+                  <Link
+                    href={activeRelease ? `/releases/${activeRelease.release.id}` : "/releases"}
+                    className="rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20"
+                  >
+                    Inspect Final Release Report →
+                  </Link>
+                </div>
+              </div>
+
+              {taskPendingApprovals.length > 0 && (
+                <div className="space-y-2.5 rounded-xl border border-amber-500/40 bg-amber-500/5 p-3">
+                  <div className="text-xs font-semibold text-amber-200">
+                    Gated Action Awaiting Your Approval
+                  </div>
+                  {taskPendingApprovals.map((app) => (
+                    <ApprovalActionCard
+                      key={app.id}
+                      approval={app}
+                      compact
+                      highlighted
+                      onUpdated={handleTaskApprovalUpdated}
+                    />
+                  ))}
+                </div>
+              )}
+
+              {liveSteps.length === 0 ? (
+                <div className="rounded-lg border border-slate-800 bg-[#0d1119] px-3 py-4 text-center text-xs text-slate-400">
+                  Waiting for backend SSE events (no progress fabricated)...
+                </div>
+              ) : (
+                <div className="max-h-64 space-y-2 overflow-y-auto pr-1">
+                  {liveSteps.map((step) => (
+                    <LiveStepRow key={`${step.seq}-${step.event_type}`} step={step} />
+                  ))}
+                </div>
+              )}
+
+              {activeTask.final_response && (
+                <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-100">
+                  <div className="mb-1 font-semibold text-emerald-200">
+                    Supervisor Final Response
+                  </div>
+                  <p className="whitespace-pre-wrap leading-relaxed">
+                    {activeTask.final_response}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </SectionCard>
+
+        {/* Dedicated NovaShop Demo Mode Panel */}
+        <SectionCard
+          className="xl:col-span-4"
+          title="Demo Mode · NovaShop"
+          subtitle="Safe interactive sandbox for the 5-Minute Demo Path"
+          actions={
+            <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-200">
+              <Sparkles className="h-3 w-3" />
+              Synthetic Data
+            </span>
+          }
+        >
+          <div className="space-y-4 text-xs">
+            <div className="flex flex-wrap gap-1.5">
+              <span className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-emerald-300">
+                ENV: development only
+              </span>
+              <span className="rounded-md border border-rose-500/30 bg-rose-500/10 px-2 py-0.5 font-mono text-[10px] font-semibold text-rose-200">
+                NEVER MUTATES PRODUCTION
+              </span>
+            </div>
+
+            <p className="leading-relaxed text-slate-300">
+              NovaShop is a sandboxed e-commerce demo storefront wired to Flagsmith and
+              ReleaseGuard telemetry. All simulator cohorts (<code className="font-mono text-amber-300">sim_*</code>)
+              are clearly badged as synthetic and isolated from production environments.
+            </p>
+
+            <div className="space-y-2 rounded-lg border border-slate-800 bg-[#0d1119] p-3">
+              <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                Telemetry Attribution
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-300">Storefront App Telemetry</span>
+                <span className="font-mono font-semibold text-emerald-300 tabular-nums">
+                  {overview?.charts?.telemetry_totals?.application_telemetry_events ?? 0} events
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-300">
+                  Synthetic Simulator (<code className="font-mono text-amber-300">sim_*</code>)
+                </span>
+                <span className="font-mono font-semibold text-amber-300 tabular-nums">
+                  {overview?.charts?.telemetry_totals?.simulator_events ?? 0} events
+                </span>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={applyNovaShopDemoScenario}
+                className="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-500 px-3 py-2 text-xs font-semibold text-white hover:bg-indigo-400"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                Load NovaShop Demo Scenario
+              </button>
+
+              <a
+                href={DEMO_APP_URL}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex w-full items-center justify-between rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-xs font-medium text-slate-200 hover:bg-slate-800"
+              >
+                <span>Open NovaShop Storefront</span>
+                <ExternalLink className="h-3.5 w-3.5 text-slate-400" />
+              </a>
+
+              <div className="grid grid-cols-2 gap-2 pt-1">
+                <Link
+                  href="/flagsmith"
+                  className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-[#0d1119] px-2.5 py-2 text-[11px] font-medium text-slate-300 hover:border-slate-700 hover:text-slate-100"
+                >
+                  <Flag className="h-3.5 w-3.5 text-indigo-400" />
+                  Flagsmith Hub
+                </Link>
+                <Link
+                  href="/experiments"
+                  className="flex items-center justify-center gap-1.5 rounded-lg border border-slate-800 bg-[#0d1119] px-2.5 py-2 text-[11px] font-medium text-slate-300 hover:border-slate-700 hover:text-slate-100"
+                >
+                  <FlaskConical className="h-3.5 w-3.5 text-cyan-400" />
+                  Experiments
+                </Link>
+              </div>
+            </div>
+          </div>
+        </SectionCard>
+      </div>
+
+      {/* Pending Actions Panel + Recent Activity Timeline */}
+      <div className="grid gap-6 xl:grid-cols-12">
+        <SectionCard
+          className="xl:col-span-6"
+          title="Pending Actions & Operational Alerts"
+          subtitle="Actionable items requiring human review or recovery (never mutates production automatically)"
+          actions={
+            <Link
+              href="/approvals"
+              className="text-xs font-medium text-indigo-300 hover:text-indigo-200"
+            >
+              Approval Center →
+            </Link>
+          }
+        >
+          {pendingApprovals.length > 0 && (
+            <div className="mb-4 space-y-3">
+              {pendingApprovals.map((app) => (
+                <ApprovalActionCard
+                  key={app.id}
+                  approval={app}
+                  compact
+                  onUpdated={() => void loadData()}
+                />
+              ))}
+            </div>
+          )}
+
+          {pendingActions.length === 0 && pendingApprovals.length === 0 ? (
+            <EmptyState
+              icon={<CheckCircle2 className="h-5 w-5 text-emerald-400" />}
+              title="All operational queues clear"
+              description="No pending approvals, guardrail breaches, failed operations, or integration alerts detected."
+            />
+          ) : (
+            <div className="divide-y divide-slate-800/80">
+              {pendingActions.slice(0, 10).map((act) => {
+                const sevColor =
+                  act.severity === "critical"
+                    ? "border-rose-500/40 bg-rose-500/15 text-rose-200"
+                    : act.severity === "high"
+                      ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
+                      : "border-slate-700 bg-slate-800 text-slate-300";
+                return (
+                  <div key={act.id} className="flex items-start justify-between gap-3 py-2.5 text-xs">
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase ${sevColor}`}>
+                          {act.severity}
+                        </span>
+                        {act.environment_name && (
+                          <EnvironmentBadge environment={act.environment_name} />
+                        )}
+                        <span className="font-medium text-slate-100">{act.title}</span>
+                      </div>
+                      <p className="text-[11px] text-slate-400">{act.description}</p>
+                    </div>
+                    <Link
+                      href={act.href}
+                      className="shrink-0 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-indigo-300 hover:bg-slate-800"
+                    >
+                      {act.action_label}
+                    </Link>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </SectionCard>
+
+        <SectionCard
+          className="xl:col-span-6"
+          title="Recent Operational Activity"
+          subtitle="Live audit events and Flagsmith rollout history with direct resource navigation"
+          actions={
+            <Link
+              href="/audit-logs"
+              className="text-xs font-medium text-indigo-300 hover:text-indigo-200"
+            >
+              Audit Trail →
+            </Link>
+          }
+        >
+          {recentActivity.length === 0 ? (
+            <EmptyState
+              icon={<Activity className="h-5 w-5" />}
+              title="No recorded activity yet"
+              description="Synchronize repositories, run AI analyses, or toggle flags to build an immutable event trail."
+            />
+          ) : (
+            <div className="divide-y divide-slate-800/80 max-h-[430px] overflow-y-auto pr-1">
+              {recentActivity.slice(0, 15).map((item) => (
+                <Link
+                  key={item.id}
+                  href={item.href}
+                  className="flex items-center justify-between gap-3 py-2.5 text-xs hover:bg-slate-900/40 rounded px-1"
+                >
+                  <div className="min-w-0 space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-medium text-slate-100">{item.title}</span>
+                      {item.resource_label && (
+                        <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-cyan-300">
+                          {item.resource_label}
+                        </span>
+                      )}
+                      {item.environment_name && (
+                        <EnvironmentBadge environment={item.environment_name} />
+                      )}
+                    </div>
+                    <p className="truncate text-[11px] text-slate-400">
+                      {item.description} · {item.actor}
+                    </p>
+                  </div>
+                  <div className="flex flex-col items-end gap-1 shrink-0">
+                    <StatusBadge status={item.status} />
+                    <span className="font-mono text-[10px] text-slate-500 tabular-nums">
+                      {formatTimestamp(item.timestamp)}
+                    </span>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          )}
+        </SectionCard>
+      </div>
+
+      {/* Executive KPIs, Domain Cards, Charts & Schedules */}
       {loading && !overview ? (
         <LoadingSkeleton rows={3} />
       ) : (
@@ -382,7 +1153,6 @@ export default function DashboardPage() {
             />
           </div>
 
-          {/* 6 Detailed Operational Metric Cards */}
           {m && (
             <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
               <DomainSummaryCard
@@ -426,15 +1196,6 @@ export default function DashboardPage() {
                     label: "Rollbacks",
                     value: m.releases.rollbacks_executed,
                     highlight: m.releases.rollbacks_executed > 0 ? "amber" : undefined,
-                  },
-                  {
-                    label: "Active Lifecycles",
-                    value: m.releases.lifecycle_active_releases ?? 0,
-                  },
-                  {
-                    label: "Ready / Blocked",
-                    value: `${m.releases.lifecycle_ready_releases ?? 0} / ${m.releases.lifecycle_blocked_releases ?? 0}`,
-                    highlight: (m.releases.lifecycle_blocked_releases ?? 0) > 0 ? "rose" : "emerald",
                   },
                   {
                     label: "Success Rate",
@@ -511,7 +1272,7 @@ export default function DashboardPage() {
 
               <DomainSummaryCard
                 title="Agent Activity"
-                href="/agent"
+                href="/command-center"
                 icon={<Bot className="h-4 w-4" />}
                 sourceLabel="LangGraph"
                 definition="Gemini multi-turn tool executions, duration & recorded token consumption"
@@ -537,136 +1298,8 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* Charts A - F */}
           {overview?.charts && <DashboardChartGrid charts={overview.charts} />}
 
-          {/* Pending Actions Panel + Recent Activity Timeline */}
-          <div className="grid gap-6 xl:grid-cols-12">
-            <SectionCard
-              className="xl:col-span-6"
-              title="Pending Actions & Operational Alerts"
-              subtitle="Actionable items requiring human review or recovery (never mutates production automatically)"
-              actions={
-                <Link
-                  href="/approvals"
-                  className="text-xs font-medium text-indigo-300 hover:text-indigo-200"
-                >
-                  Approval Center →
-                </Link>
-              }
-            >
-              {pendingApprovals.length > 0 && (
-                <div className="mb-4 space-y-3">
-                  {pendingApprovals.map((app) => (
-                    <ApprovalActionCard
-                      key={app.id}
-                      approval={app}
-                      compact
-                      onUpdated={() => void loadData()}
-                    />
-                  ))}
-                </div>
-              )}
-
-              {pendingActions.length === 0 && pendingApprovals.length === 0 ? (
-                <EmptyState
-                  icon={<CheckCircle2 className="h-5 w-5 text-emerald-400" />}
-                  title="All operational queues clear"
-                  description="No pending approvals, guardrail breaches, failed operations, or integration alerts detected."
-                />
-              ) : (
-                <div className="divide-y divide-slate-800/80">
-                  {pendingActions.slice(0, 10).map((act) => {
-                    const sevColor =
-                      act.severity === "critical"
-                        ? "border-rose-500/40 bg-rose-500/15 text-rose-200"
-                        : act.severity === "high"
-                          ? "border-amber-500/40 bg-amber-500/15 text-amber-200"
-                          : "border-slate-700 bg-slate-800 text-slate-300";
-                    return (
-                      <div key={act.id} className="flex items-start justify-between gap-3 py-2.5 text-xs">
-                        <div className="min-w-0 space-y-1">
-                          <div className="flex flex-wrap items-center gap-2">
-                            <span className={`rounded border px-1.5 py-0.5 text-[10px] font-bold uppercase ${sevColor}`}>
-                              {act.severity}
-                            </span>
-                            {act.environment_name && (
-                              <EnvironmentBadge environment={act.environment_name} />
-                            )}
-                            <span className="font-medium text-slate-100">{act.title}</span>
-                          </div>
-                          <p className="text-[11px] text-slate-400">{act.description}</p>
-                        </div>
-                        <Link
-                          href={act.href}
-                          className="shrink-0 rounded-md border border-slate-700 bg-slate-900 px-2.5 py-1 text-[11px] font-medium text-indigo-300 hover:bg-slate-800"
-                        >
-                          {act.action_label}
-                        </Link>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </SectionCard>
-
-            <SectionCard
-              className="xl:col-span-6"
-              title="Recent Operational Activity"
-              subtitle="Live audit events and Flagsmith rollout history with direct resource navigation"
-              actions={
-                <Link
-                  href="/audit-logs"
-                  className="text-xs font-medium text-indigo-300 hover:text-indigo-200"
-                >
-                  Audit Trail →
-                </Link>
-              }
-            >
-              {recentActivity.length === 0 ? (
-                <EmptyState
-                  icon={<Activity className="h-5 w-5" />}
-                  title="No recorded activity yet"
-                  description="Synchronize repositories, run AI analyses, or toggle flags to build an immutable event trail."
-                />
-              ) : (
-                <div className="divide-y divide-slate-800/80 max-h-[430px] overflow-y-auto pr-1">
-                  {recentActivity.slice(0, 15).map((item) => (
-                    <Link
-                      key={item.id}
-                      href={item.href}
-                      className="flex items-center justify-between gap-3 py-2.5 text-xs hover:bg-slate-900/40 rounded px-1"
-                    >
-                      <div className="min-w-0 space-y-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="font-medium text-slate-100">{item.title}</span>
-                          {item.resource_label && (
-                            <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px] text-cyan-300">
-                              {item.resource_label}
-                            </span>
-                          )}
-                          {item.environment_name && (
-                            <EnvironmentBadge environment={item.environment_name} />
-                          )}
-                        </div>
-                        <p className="truncate text-[11px] text-slate-400">
-                          {item.description} · {item.actor}
-                        </p>
-                      </div>
-                      <div className="flex flex-col items-end gap-1 shrink-0">
-                        <StatusBadge status={item.status} />
-                        <span className="font-mono text-[10px] text-slate-500 tabular-nums">
-                          {formatTimestamp(item.timestamp)}
-                        </span>
-                      </div>
-                    </Link>
-                  ))}
-                </div>
-              )}
-            </SectionCard>
-          </div>
-
-          {/* Row 5: Upcoming Scheduled Jobs + Data Source Transparency */}
           <div className="grid gap-6 lg:grid-cols-2">
             <SectionCard
               title="Upcoming Scheduled Automation"
@@ -764,23 +1397,43 @@ export default function DashboardPage() {
         </>
       )}
 
-      {health && (!health.github_connected || !health.flagsmith_connected) && (
-        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3 text-xs text-amber-200">
-          <div className="flex items-center gap-2.5">
-            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
-            <span>
-              Complete GitHub and Flagsmith setup in Settings to enable live PR analysis,
-              Draft PR creation, and Feature Versioning v2 rollouts.
-            </span>
+      {/* Confirmation Dialog for Sensitive Actions */}
+      <Modal
+        open={Boolean(confirmAction)}
+        onClose={() => setConfirmAction(null)}
+        title={confirmAction?.title ?? "Confirm Action"}
+        subtitle={confirmAction?.subtitle}
+      >
+        {confirmAction && (
+          <div className="space-y-4">
+            <p className="text-xs leading-relaxed text-slate-300">
+              {confirmAction.description}
+            </p>
+            <div className="flex justify-end gap-2 border-t border-slate-800 pt-3">
+              <button
+                type="button"
+                onClick={() => setConfirmAction(null)}
+                className="rounded-lg border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs font-medium text-slate-200 hover:bg-slate-800"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void confirmAction.onConfirm()}
+                className={`rounded-lg px-3.5 py-1.5 text-xs font-semibold ${
+                  confirmAction.tone === "rose"
+                    ? "bg-rose-500 text-white hover:bg-rose-400"
+                    : confirmAction.tone === "amber"
+                      ? "bg-amber-500 text-slate-950 hover:bg-amber-400"
+                      : "bg-indigo-500 text-white hover:bg-indigo-400"
+                }`}
+              >
+                {confirmAction.confirmLabel}
+              </button>
+            </div>
           </div>
-          <Link
-            href="/settings"
-            className="rounded-lg border border-amber-500/40 bg-amber-500/15 px-3 py-1.5 font-semibold text-amber-100 hover:bg-amber-500/25"
-          >
-            Go to Settings
-          </Link>
-        </div>
-      )}
+        )}
+      </Modal>
     </div>
   );
 }

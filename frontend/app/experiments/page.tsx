@@ -4,14 +4,17 @@ import React, { Suspense, useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import {
-  AlertTriangle,
-  CheckCircle2,
+  Bot,
   FlaskConical,
+  HelpCircle,
+  Hourglass,
   Info,
   Play,
   RefreshCw,
+  ShieldAlert,
   Sparkles,
   Square,
+  Trophy,
 } from "lucide-react";
 import {
   activateExperiment,
@@ -462,9 +465,22 @@ function ExperimentsInner() {
               >
                 <div className="flex flex-wrap items-center gap-3 text-xs text-slate-300">
                   <EnvironmentBadge environment={selectedExp.environment_name} />
-                  {selectedExp.flagsmith_experiment_id && (
+                  {selectedExp.environment_name !== "production" ? (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2.5 py-0.5 text-[11px] font-semibold text-amber-200">
+                      Synthetic / Non-Prod Traffic
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/35 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-semibold text-emerald-300">
+                      Production Telemetry
+                    </span>
+                  )}
+                  {selectedExp.flagsmith_experiment_id ? (
                     <span className="rounded border border-emerald-500/40 bg-emerald-500/15 px-2 py-0.5 font-mono text-[11px] text-emerald-300">
                       Flagsmith Exp #{selectedExp.flagsmith_experiment_id}
+                    </span>
+                  ) : (
+                    <span className="rounded border border-cyan-500/35 bg-cyan-500/10 px-2 py-0.5 font-mono text-[11px] text-cyan-200">
+                      Tracked-Events Fallback
                     </span>
                   )}
                   <span className="font-mono">
@@ -473,7 +489,7 @@ function ExperimentsInner() {
                     %)
                   </span>
                   <span className="font-mono">
-                    Treatment: {selectedExp.treatment_variation} (
+                    Variant: {selectedExp.treatment_variation} (
                     {selectedExp.traffic_allocation?.[selectedExp.treatment_variation] ??
                       50}
                     %)
@@ -484,11 +500,11 @@ function ExperimentsInner() {
                 </div>
               </SectionCard>
 
-              {/* Deterministic Recommendation Banner */}
+              {/* Deterministic Recommendation vs AI Narrative */}
               {(recommendation || selectedExp.latest_recommendation) && (
                 <SectionCard
                   title="Release Recommendation Engine"
-                  subtitle="Deterministic 5-state evaluator (independent of LLM) + Gemini narrative"
+                  subtitle="Deterministic 5-state evaluator (math/rules only) separated from Gemini AI narrative"
                   actions={
                     <RecommendationBadge
                       recommendation={
@@ -499,14 +515,40 @@ function ExperimentsInner() {
                   }
                 >
                   <div className="space-y-3 text-xs">
+                    {Array.isArray(recommendation?.triggers) &&
+                      recommendation.triggers.length > 0 && (
+                        <div className="space-y-1.5">
+                          <div className="text-[10px] font-semibold uppercase tracking-wider text-cyan-300">
+                            Deterministic Rule Triggers
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {recommendation.triggers.map((t, i) => (
+                              <span
+                                key={i}
+                                className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 font-mono text-[11px] text-cyan-200"
+                              >
+                                {typeof t === "string"
+                                  ? t
+                                  : t.description || `${t.metric} ${t.operator} ${t.threshold}`}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     {(recommendation?.narrative ||
                       recommendation?.rationale ||
                       selectedExp.recommendation_rationale) && (
-                      <p className="rounded-lg border border-slate-800 bg-[#0d1119] p-3 leading-relaxed text-slate-200">
-                        {recommendation?.narrative ||
-                          recommendation?.rationale ||
-                          selectedExp.recommendation_rationale}
-                      </p>
+                      <div className="rounded-lg border border-indigo-500/30 bg-[#0d1119] p-3 space-y-1.5">
+                        <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-indigo-300">
+                          <Bot className="h-3.5 w-3.5" />
+                          AI Recommendation Narrative (Gemini Inference)
+                        </div>
+                        <p className="leading-relaxed text-slate-200">
+                          {recommendation?.narrative ||
+                            recommendation?.rationale ||
+                            selectedExp.recommendation_rationale}
+                        </p>
+                      </div>
                     )}
                     {recommendation?.confidence_summary && (
                       <div className="text-slate-300">
@@ -516,21 +558,6 @@ function ExperimentsInner() {
                         {recommendation.confidence_summary}
                       </div>
                     )}
-                    {Array.isArray(recommendation?.triggers) &&
-                      recommendation.triggers.length > 0 && (
-                        <div className="flex flex-wrap gap-1.5">
-                          {recommendation.triggers.map((t, i) => (
-                            <span
-                              key={i}
-                              className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 font-mono text-[11px] text-cyan-200"
-                            >
-                              {typeof t === "string"
-                                ? t
-                                : t.description || `${t.metric} ${t.operator} ${t.threshold}`}
-                            </span>
-                          ))}
-                        </div>
-                      )}
                   </div>
                 </SectionCard>
               )}
@@ -538,46 +565,148 @@ function ExperimentsInner() {
               {/* Bayesian Metrics & Charts */}
               {analysis && (
                 <>
-                  {/* Explicit Experiment Outcome & Sample Adequacy Bar */}
-                  <div
-                    className={cn(
-                      "flex flex-wrap items-center justify-between gap-3 rounded-xl border px-4 py-3 text-xs",
-                      analysis.experiment_outcome === "GUARDRAIL_BREACHED"
-                        ? "border-rose-500/40 bg-rose-500/10 text-rose-200"
-                        : analysis.experiment_outcome === "VARIANT_WINS" ||
-                            analysis.experiment_outcome === "CONTROL_WINS"
-                          ? "border-emerald-500/35 bg-emerald-500/10 text-emerald-200"
-                          : "border-amber-500/35 bg-amber-500/10 text-amber-200"
-                    )}
-                  >
-                    <div className="flex items-center gap-2">
-                      {analysis.sample_adequacy.is_adequate &&
-                      analysis.experiment_outcome !== "GUARDRAIL_BREACHED" ? (
-                        <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                      ) : (
-                        <AlertTriangle className="h-4 w-4 text-amber-400" />
-                      )}
-                      <div>
-                        <span className="font-mono font-semibold uppercase">
-                          {analysis.experiment_outcome ?? (analysis.sample_adequacy.is_adequate ? "ADEQUATE" : "INSUFFICIENT_DATA")}
-                        </span>
-                        <span className="ml-2">
-                          {analysis.outcome_rationale ||
-                            `Control: ${analysis.sample_adequacy.control_exposures}, Treatment: ${analysis.sample_adequacy.treatment_exposures} (min ${analysis.sample_adequacy.min_required}/arm)`}
-                        </span>
+                  {/* Unmistakably Distinct Experiment Outcome & Sample Adequacy Banner */}
+                  {(() => {
+                    const isGuardrailBreached =
+                      analysis.experiment_outcome === "GUARDRAIL_BREACHED" ||
+                      Boolean(analysis.guardrails?.payment_failed?.breached);
+                    const isInsufficient =
+                      !isGuardrailBreached &&
+                      (!analysis.sample_adequacy.is_adequate ||
+                        analysis.experiment_outcome === "INSUFFICIENT_DATA");
+                    const isWinner =
+                      !isGuardrailBreached &&
+                      !isInsufficient &&
+                      (analysis.experiment_outcome === "VARIANT_WINS" ||
+                        analysis.experiment_outcome === "CONTROL_WINS");
+
+                    const minReq = Math.max(1, analysis.sample_adequacy.min_required);
+                    const ctrlPct = Math.min(
+                      100,
+                      Math.round((analysis.sample_adequacy.control_exposures / minReq) * 100)
+                    );
+                    const trtPct = Math.min(
+                      100,
+                      Math.round((analysis.sample_adequacy.treatment_exposures / minReq) * 100)
+                    );
+
+                    const bannerStyle = isGuardrailBreached
+                      ? "border-2 border-rose-500/70 bg-rose-950/30 text-rose-100"
+                      : isInsufficient
+                        ? "border-2 border-dashed border-amber-500/60 bg-amber-950/20 text-amber-100"
+                        : isWinner
+                          ? "border-2 border-emerald-500/60 bg-emerald-950/20 text-emerald-100"
+                          : "border-2 border-sky-500/50 bg-slate-900/80 text-slate-100";
+
+                    const verdictTitle = isGuardrailBreached
+                      ? "GUARDRAIL BREACHED — DO NOT PROMOTE / ROLLBACK RECOMMENDED"
+                      : isInsufficient
+                        ? "INSUFFICIENT DATA — STATISTICAL POWER NOT MET (DO NOT SHIP)"
+                        : isWinner
+                          ? analysis.experiment_outcome === "CONTROL_WINS"
+                            ? "CONTROL WINS — VARIANT UNDERPERFORMS"
+                            : "WINNING VARIANT DETECTED — READY FOR PROMOTION REVIEW"
+                          : "INCONCLUSIVE — NO CLEAR WINNER YET";
+
+                    return (
+                      <div className={cn("rounded-xl p-4 text-xs space-y-3", bannerStyle)}>
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="flex items-start gap-3">
+                            {isGuardrailBreached ? (
+                              <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-rose-400" />
+                            ) : isInsufficient ? (
+                              <Hourglass className="mt-0.5 h-5 w-5 shrink-0 text-amber-400" />
+                            ) : isWinner ? (
+                              <Trophy className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />
+                            ) : (
+                              <HelpCircle className="mt-0.5 h-5 w-5 shrink-0 text-sky-400" />
+                            )}
+                            <div className="space-y-1">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="font-mono text-sm font-bold tracking-tight uppercase">
+                                  {verdictTitle}
+                                </span>
+                                <span className="rounded border border-current/30 px-2 py-0.5 font-mono text-[10px] uppercase">
+                                  {analysis.experiment_outcome ??
+                                    (isInsufficient ? "INSUFFICIENT_DATA" : "INCONCLUSIVE")}
+                                </span>
+                              </div>
+                              <p className="text-slate-300 leading-relaxed">
+                                {analysis.outcome_rationale ||
+                                  (isInsufficient
+                                    ? `Minimum sample size of ${minReq} exposures per arm has not been reached. Continue collecting telemetry before making a rollout decision.`
+                                    : `Control: ${analysis.sample_adequacy.control_exposures}, Treatment: ${analysis.sample_adequacy.treatment_exposures} (min ${minReq}/arm)`)}
+                              </p>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span
+                              className={cn(
+                                "rounded-full border px-2.5 py-0.5 font-mono text-[11px] font-semibold",
+                                analysis.sample_adequacy.is_adequate
+                                  ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+                                  : "border-amber-500/40 bg-amber-500/15 text-amber-200"
+                              )}
+                            >
+                              Sample Adequacy:{" "}
+                              {analysis.sample_adequacy.is_adequate ? "ADEQUATE" : "INADEQUATE"}
+                            </span>
+                            {analysis.flagsmith_native_summary && (
+                              <span className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 font-mono text-[11px] text-slate-300">
+                                Flagsmith Native:{" "}
+                                {analysis.flagsmith_native_summary.available
+                                  ? analysis.flagsmith_native_summary.is_final
+                                    ? "Final"
+                                    : "Aggregating (is_final=false)"
+                                  : "Unavailable"}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Sample Adequacy Progress Bars */}
+                        <div className="grid gap-3 sm:grid-cols-2 pt-1">
+                          <div className="space-y-1">
+                            <div className="flex justify-between font-mono text-[11px] text-slate-300">
+                              <span>Control ({selectedExp.control_variation})</span>
+                              <span>
+                                {analysis.sample_adequacy.control_exposures} / {minReq} min (
+                                {ctrlPct}%)
+                              </span>
+                            </div>
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                              <div
+                                className={cn(
+                                  "h-full rounded-full transition-all",
+                                  ctrlPct >= 100 ? "bg-emerald-400" : "bg-amber-400"
+                                )}
+                                style={{ width: `${ctrlPct}%` }}
+                              />
+                            </div>
+                          </div>
+                          <div className="space-y-1">
+                            <div className="flex justify-between font-mono text-[11px] text-slate-300">
+                              <span>Variant ({selectedExp.treatment_variation})</span>
+                              <span>
+                                {analysis.sample_adequacy.treatment_exposures} / {minReq} min (
+                                {trtPct}%)
+                              </span>
+                            </div>
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-800">
+                              <div
+                                className={cn(
+                                  "h-full rounded-full transition-all",
+                                  trtPct >= 100 ? "bg-emerald-400" : "bg-amber-400"
+                                )}
+                                style={{ width: `${trtPct}%` }}
+                              />
+                            </div>
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                    {analysis.flagsmith_native_summary && (
-                      <span className="rounded border border-slate-700 bg-slate-900 px-2 py-0.5 font-mono text-[11px] text-slate-300">
-                        Flagsmith Native:{" "}
-                        {analysis.flagsmith_native_summary.available
-                          ? analysis.flagsmith_native_summary.is_final
-                            ? "Final"
-                            : "Aggregating (is_final=false)"
-                          : "Unavailable"}
-                      </span>
-                    )}
-                  </div>
+                    );
+                  })()}
 
                   {/* Distinct Participants, Exposures, and Conversions */}
                   {analysis.participant_metrics && (
