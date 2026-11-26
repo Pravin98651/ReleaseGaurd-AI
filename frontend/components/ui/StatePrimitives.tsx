@@ -50,7 +50,7 @@ export function SectionCard({
   return (
     <section
       className={cn(
-        "rounded-xl border border-slate-800/90 bg-[#111622] shadow-sm",
+        "rounded-2xl border border-white/5 bg-[#171c2a] shadow-[7px_7px_15px_rgba(6,8,14,0.72),-5px_-5px_12px_rgba(36,44,66,0.42)]",
         className
       )}
     >
@@ -96,9 +96,9 @@ export function MetricCard({
   const content = (
     <div
       className={cn(
-        "rounded-xl border bg-[#111622] p-4 transition-colors",
+        "rounded-2xl border bg-[#171c2a] p-4 shadow-[7px_7px_15px_rgba(6,8,14,0.72),-5px_-5px_12px_rgba(36,44,66,0.42)] transition-all",
         toneBorder[tone],
-        href && "hover:border-slate-700 hover:bg-[#151c2b]"
+        href && "hover:border-white/10 hover:bg-[#1c2233]"
       )}
     >
       <div className="flex items-center justify-between gap-2">

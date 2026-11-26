@@ -34,8 +34,8 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           }}
         />
       </head>
-      <body className="min-h-full bg-[#090c12] text-slate-100 selection:bg-indigo-500/30 selection:text-indigo-200">
-        <Suspense fallback={<div className="min-h-screen bg-[#090c12]" />}>
+      <body className="min-h-full bg-[#131722] text-slate-100 selection:bg-indigo-500/30 selection:text-indigo-200">
+        <Suspense fallback={<div className="min-h-screen bg-[#131722]" />}>
           <AppShell>{children}</AppShell>
         </Suspense>
       </body>

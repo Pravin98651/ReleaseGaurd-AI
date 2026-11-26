@@ -2,12 +2,15 @@
 
 :root,
 html.dark {
-  --bg-canvas: #090c12;
-  --bg-sidebar: #0d1119;
-  --bg-surface: #111622;
-  --bg-elevated: #161d2d;
-  --border-subtle: #1e2738;
-  --border-strong: #2d3a52;
+  --bg-canvas: #131722;
+  --bg-sidebar: #151a27;
+  --bg-surface: #171c2a;
+  --bg-elevated: #1c2233;
+  --border-subtle: rgba(255, 255, 255, 0.05);
+  --border-strong: rgba(255, 255, 255, 0.09);
+  --neu-shadow-raised: 7px 7px 15px rgba(6, 8, 14, 0.72), -5px -5px 12px rgba(36, 44, 66, 0.42);
+  --neu-shadow-sm: 4px 4px 9px rgba(6, 8, 14, 0.65), -3px -3px 7px rgba(36, 44, 66, 0.36);
+  --neu-shadow-inset: inset 4px 4px 9px rgba(6, 8, 14, 0.78), inset -3px -3px 7px rgba(36, 44, 66, 0.34);
   --text-primary: #f1f5f9;
   --text-secondary: #94a3b8;
   --text-muted: #64748b;
@@ -17,12 +20,15 @@ html.dark {
 }
 
 html.light {
-  --bg-canvas: #f8fafc;
-  --bg-sidebar: #ffffff;
-  --bg-surface: #ffffff;
-  --bg-elevated: #f1f5f9;
-  --border-subtle: #e2e8f0;
-  --border-strong: #cbd5e1;
+  --bg-canvas: #e6ecf5;
+  --bg-sidebar: #eaf0f8;
+  --bg-surface: #e8eef7;
+  --bg-elevated: #eef3fa;
+  --border-subtle: rgba(255, 255, 255, 0.55);
+  --border-strong: rgba(148, 163, 184, 0.35);
+  --neu-shadow-raised: 7px 7px 15px rgba(163, 177, 198, 0.55), -6px -6px 14px rgba(255, 255, 255, 0.88);
+  --neu-shadow-sm: 4px 4px 9px rgba(163, 177, 198, 0.48), -3px -3px 8px rgba(255, 255, 255, 0.85);
+  --neu-shadow-inset: inset 4px 4px 9px rgba(163, 177, 198, 0.55), inset -3px -3px 8px rgba(255, 255, 255, 0.85);
   --text-primary: #0f172a;
   --text-secondary: #475569;
   --text-muted: #64748b;
@@ -237,6 +243,94 @@ html.light textarea::placeholder {
 
 .tabular-nums {
   font-variant-numeric: tabular-nums;
+}
+
+/* Global Neumorphism surfaces, inset controls, and tactile buttons */
+html.dark .bg-\[\#090c12\],
+html.dark .bg-\[\#090c12\]\/90,
+html.dark .bg-\[\#0a0e16\] {
+  background-color: var(--bg-canvas) !important;
+}
+
+html.dark .bg-\[\#0d1119\],
+html.dark .bg-\[\#0d1119\]\/70,
+html.dark .bg-\[\#111622\],
+html.dark .bg-\[\#111622\]\/80,
+html.dark .bg-\[\#131926\],
+html.dark .bg-\[\#161d2d\],
+html.dark .bg-slate-900,
+html.dark .bg-slate-900\/90,
+html.dark .bg-slate-900\/70,
+html.dark .bg-slate-900\/60,
+html.dark .bg-slate-900\/50 {
+  background-color: var(--bg-surface) !important;
+  box-shadow: var(--neu-shadow-raised);
+  border-color: var(--border-subtle) !important;
+}
+
+html.dark aside,
+html.dark header {
+  background-color: var(--bg-sidebar) !important;
+  box-shadow: var(--neu-shadow-sm);
+}
+
+html.dark input:not([type="checkbox"]):not([type="radio"]),
+html.dark select,
+html.dark textarea,
+html.dark .bg-slate-950,
+html.dark .bg-slate-950\/80,
+html.dark .bg-slate-950\/60,
+html.dark .bg-\[\#070a0f\],
+html.dark .bg-\[\#0b0f17\],
+html.dark .bg-\[\#0d121c\] {
+  background-color: #0e121c !important;
+  box-shadow: var(--neu-shadow-inset);
+  border-color: rgba(255, 255, 255, 0.04) !important;
+}
+
+html.light .bg-\[\#0d1119\],
+html.light .bg-\[\#0d1119\]\/70,
+html.light .bg-\[\#111622\],
+html.light .bg-\[\#111622\]\/80,
+html.light .bg-\[\#131926\],
+html.light .bg-\[\#161d2d\],
+html.light .bg-slate-900,
+html.light .bg-slate-900\/90,
+html.light .bg-slate-900\/70,
+html.light .bg-slate-900\/60,
+html.light .bg-slate-900\/50 {
+  background-color: var(--bg-surface) !important;
+  box-shadow: var(--neu-shadow-raised);
+  border-color: var(--border-subtle) !important;
+}
+
+html.light input:not([type="checkbox"]):not([type="radio"]),
+html.light select,
+html.light textarea,
+html.light .bg-slate-950,
+html.light .bg-slate-950\/80,
+html.light .bg-slate-950\/60,
+html.light .bg-\[\#070a0f\],
+html.light .bg-\[\#0b0f17\],
+html.light .bg-\[\#0d121c\] {
+  background-color: #e1e8f2 !important;
+  box-shadow: var(--neu-shadow-inset);
+  border-color: rgba(255, 255, 255, 0.65) !important;
+}
+
+button,
+.rounded-xl,
+.rounded-lg {
+  transition: box-shadow 160ms ease, transform 160ms ease, background-color 160ms ease, border-color 160ms ease;
+}
+
+button:not(:disabled) {
+  box-shadow: var(--neu-shadow-sm);
+}
+
+button:not(:disabled):active {
+  box-shadow: var(--neu-shadow-inset);
+  transform: translateY(0.5px);
 }
 
 /* Subtle custom scrollbars for control-plane density */

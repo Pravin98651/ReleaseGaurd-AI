@@ -1,8 +1,12 @@
 @import "tailwindcss";
 
 :root {
-  --background: #0b0f17;
+  --background: #131722;
   --foreground: #f1f5f9;
+  --neu-surface: #171c2a;
+  --neu-raised: 7px 7px 15px rgba(6, 8, 14, 0.72), -5px -5px 12px rgba(36, 44, 66, 0.42);
+  --neu-sm: 4px 4px 9px rgba(6, 8, 14, 0.65), -3px -3px 7px rgba(36, 44, 66, 0.36);
+  --neu-inset: inset 4px 4px 9px rgba(6, 8, 14, 0.78), inset -3px -3px 7px rgba(36, 44, 66, 0.34);
 }
 
 @theme inline {
@@ -16,4 +20,34 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+}
+
+.bg-slate-900,
+.bg-slate-900\/80,
+.bg-slate-900\/60,
+.bg-\[\#111622\],
+.bg-\[\#0f1522\] {
+  background-color: var(--neu-surface) !important;
+  box-shadow: var(--neu-raised);
+  border-color: rgba(255, 255, 255, 0.05) !important;
+}
+
+input:not([type="checkbox"]):not([type="radio"]),
+select,
+textarea,
+.bg-slate-950,
+.bg-slate-950\/80 {
+  background-color: #0e121c !important;
+  box-shadow: var(--neu-inset);
+  border-color: rgba(255, 255, 255, 0.04) !important;
+}
+
+button:not(:disabled) {
+  box-shadow: var(--neu-sm);
+  transition: box-shadow 160ms ease, transform 160ms ease;
+}
+
+button:not(:disabled):active {
+  box-shadow: var(--neu-inset);
+  transform: translateY(0.5px);
 }
