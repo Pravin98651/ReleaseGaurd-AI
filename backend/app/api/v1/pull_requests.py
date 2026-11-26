@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 from app.agents.approval_executor import capture_expected_precondition
 from app.agents.specialists.pr_agent import (
     analyze_pr_with_static_and_gemini,
+    annotate_flag_opportunities_with_existing,
     generate_context_aware_flag_patch,
 )
 from app.agents.tools.pr_tools import (
@@ -23,6 +24,7 @@ from app.api.deps import (
     AuthenticatedOperator,
     DBSession,
     DefaultOperator,
+    build_flagsmith_client,
     build_gemini_client_from_app,
     build_github_client,
     build_tool_context,
@@ -33,14 +35,21 @@ from app.core.database import utcnow
 from app.models import (
     ActorType,
     AnalysisStatus,
+    AuditLog,
     AuditStatus,
     CodeChange,
     CodeChangeStatus,
     CodeChangeType,
+    FeatureFlag,
+    GitHubCheckRun,
     PolicyCategory,
     PullRequest,
+    PullRequestAnalysisComment,
     PullRequestState,
+    ReleaseRiskAssessment,
     Repository,
+    RiskClassification,
+    RiskDimensionResult,
     RiskLevel,
     ValidationStatus,
 )
@@ -64,6 +73,49 @@ from app.services.policy_engine import PolicyEngine
 
 pull_requests_router = APIRouter(prefix="/pull-requests", tags=["pull-requests"])
 code_changes_router = APIRouter(prefix="/code-changes", tags=["code-changes"])
+
+_RISK_RANK: dict[RiskLevel, int] = {
+    RiskLevel.LOW: 0,
+    RiskLevel.MEDIUM: 1,
+    RiskLevel.HIGH: 2,
+    RiskLevel.CRITICAL: 3,
+}
+
+
+def _classification_to_risk_level(
+    classification: RiskClassification,
+    static_level: RiskLevel,
+) -> RiskLevel:
+    mapping = {
+        RiskClassification.LOW: RiskLevel.LOW,
+        RiskClassification.MODERATE: RiskLevel.MEDIUM,
+        RiskClassification.ELEVATED: RiskLevel.MEDIUM,
+        RiskClassification.HIGH: RiskLevel.HIGH,
+        RiskClassification.CRITICAL: RiskLevel.CRITICAL,
+    }
+    engine_level = mapping.get(classification, RiskLevel.MEDIUM)
+    return engine_level if _RISK_RANK[engine_level] >= _RISK_RANK[static_level] else static_level
+
+
+async def _collect_existing_flag_keys(
+    session: DBSession,
+    request: Request,
+    repo: Repository,
+) -> set[str]:
+    """Gather existing flag keys from local DB and Flagsmith project (best-effort)."""
+    keys = set((await session.execute(select(FeatureFlag.key))).scalars().all())
+    if repo.flagsmith_project_id:
+        try:
+            fs = await build_flagsmith_client(request.app, session)
+            if fs.is_configured:
+                remote_flags = await fs.list_features(repo.flagsmith_project_id)
+                for rf in remote_flags:
+                    name = str(rf.get("name") or "").strip()
+                    if name:
+                        keys.add(name)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Skipping remote Flagsmith flag list for dedup: %s", exc)
+    return keys
 
 
 @pull_requests_router.get("", response_model=PaginatedResponse[PullRequestOut])
@@ -151,6 +203,81 @@ async def get_pull_request(
         except Exception as exc:  # noqa: BLE001
             logger.debug("Skipping live PR changed_files fetch for PR %s: %s", pr.id, exc)
 
+    assessment = (
+        await session.execute(
+            select(ReleaseRiskAssessment)
+            .where(ReleaseRiskAssessment.pull_request_id == pr.id)
+            .order_by(ReleaseRiskAssessment.is_current.desc(), ReleaseRiskAssessment.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    risk_assessment_summary: dict[str, Any] | None = None
+    if assessment is not None:
+        dims = (
+            (
+                await session.execute(
+                    select(RiskDimensionResult)
+                    .where(RiskDimensionResult.assessment_id == assessment.id)
+                    .order_by(RiskDimensionResult.dimension_key.asc())
+                )
+            )
+            .scalars()
+            .all()
+        )
+        risk_assessment_summary = {
+            "id": str(assessment.id),
+            "assessment_key": assessment.assessment_key,
+            "overall_risk_score": assessment.risk_score,
+            "risk_classification": assessment.risk_level.value
+            if assessment.risk_level
+            else None,
+            "commit_sha": assessment.commit_sha,
+            "dimensions": [
+                {
+                    "dimension_key": d.dimension_key,
+                    "dimension_name": d.dimension_name,
+                    "score": d.score,
+                    "weight": d.weight,
+                    "weighted_contribution": d.weighted_contribution,
+                    "severity": d.severity.value if d.severity else None,
+                    "status": d.status.value if d.status else None,
+                    "explanations": list(d.explanations or []),
+                    "limitations": list(d.limitations or []),
+                }
+                for d in dims
+            ],
+        }
+
+    check_run = (
+        await session.execute(
+            select(GitHubCheckRun)
+            .where(GitHubCheckRun.pull_request_id == pr.id, GitHubCheckRun.is_superseded.is_(False))
+            .order_by(GitHubCheckRun.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    pr_comment = (
+        await session.execute(
+            select(PullRequestAnalysisComment)
+            .where(PullRequestAnalysisComment.pull_request_id == pr.id)
+            .order_by(PullRequestAnalysisComment.updated_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    latest_audit = (
+        await session.execute(
+            select(AuditLog)
+            .where(
+                AuditLog.resource_type == "pull_request",
+                AuditLog.resource_id == str(pr.id),
+                AuditLog.event_action == "pr.analyzed",
+            )
+            .order_by(AuditLog.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    audit_details = dict(latest_audit.details or {}) if latest_audit else {}
+
     pr_out = PullRequestOut.model_validate(pr).model_dump()
     return PullRequestDetailOut(
         **pr_out,
@@ -161,6 +288,31 @@ async def get_pull_request(
             "confirmed_risks_count": len(pr.confirmed_risks or []),
             "potential_risks_count": len(pr.potential_risks or []),
             "flag_opportunities_count": len(pr.flag_opportunities or []),
+            "recommendations": list(audit_details.get("recommendations") or []),
+            "unknowns": list(audit_details.get("unknowns") or []),
+            "flag_agent_recommendation": audit_details.get("flag_agent_recommendation"),
+            "risk_assessment": risk_assessment_summary,
+            "dx_status": {
+                "check_run": (
+                    {
+                        "status": check_run.status.value,
+                        "conclusion": check_run.conclusion.value if check_run.conclusion else None,
+                        "policy_mode": check_run.policy_mode,
+                        "commit_sha": check_run.commit_sha,
+                    }
+                    if check_run
+                    else None
+                ),
+                "comment": (
+                    {
+                        "publish_status": pr_comment.publish_status,
+                        "commit_sha": pr_comment.commit_sha,
+                        "external_comment_id": pr_comment.external_comment_id,
+                    }
+                    if pr_comment
+                    else None
+                ),
+            },
         },
     )
 
@@ -185,7 +337,19 @@ async def analyze_pull_request(
         raise APIException(404, "REPOSITORY_NOT_FOUND", "Parent repository not found.")
 
     gh = await build_github_client(request.app, session)
-    files_data = await gh.get_pull_request_files(repo.owner, repo.name, pr.github_pr_number)
+    extra_signals: list[str] = []
+    try:
+        live_pr = await gh.get_pull_request(repo.owner, repo.name, pr.github_pr_number)
+        live_sha = str((live_pr.get("head") or {}).get("sha") or "")
+        if live_sha and live_sha != pr.head_sha:
+            pr.head_sha = live_sha
+            extra_signals.append("stale_sha_refreshed")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Skipping live PR head_sha refresh for PR %s: %s", pr.id, exc)
+
+    files_data = await gh.get_pull_request_files(
+        repo.owner, repo.name, pr.github_pr_number, max_files=100
+    )
 
     ws = await PolicyEngine.get_workspace_settings(session)
     gemini_client = build_gemini_client_from_app(request.app, model_override=ws.gemini_model)
@@ -202,14 +366,53 @@ async def analyze_pull_request(
         gemini_client=gemini_client,
     )
 
-    pr.risk_score = int(analysis["risk_score"])
-    pr.risk_level = RiskLevel(str(analysis["risk_level"]).lower())
+    existing_flag_keys = await _collect_existing_flag_keys(session, request, repo)
+    annotated_opps, flag_agent_rec = annotate_flag_opportunities_with_existing(
+        list(analysis["flag_opportunities"]), existing_flag_keys
+    )
+
+    from app.services.risk_engine.risk_service import IntelligentReleaseRiskService
+
+    static_level = RiskLevel(str(analysis["risk_level"]).lower())
+    static_score = int(analysis["risk_score"])
+    assessment = await IntelligentReleaseRiskService.assess_release(
+        session,
+        pull_request_id=pr.id,
+        repository_id=repo.id,
+        target_environment="development",
+        actor_id=operator.id,
+        github_client=gh,
+        gemini_client=None,
+        files_override=files_data,
+        create_execution=True,
+    )
+    combined_score = max(static_score, int(assessment.risk_score))
+    combined_level = _classification_to_risk_level(assessment.risk_level, static_level)
+
+    pr.risk_score = combined_score
+    pr.risk_level = combined_level
     pr.analysis_summary = str(analysis["analysis_summary"])
     pr.confirmed_risks = list(analysis["confirmed_risks"])
     pr.potential_risks = list(analysis["potential_risks"])
-    pr.flag_opportunities = list(analysis["flag_opportunities"])
+    pr.flag_opportunities = annotated_opps
     pr.analysis_status = AnalysisStatus.COMPLETED
     pr.analyzed_at = utcnow()
+    await session.flush()
+
+    try:
+        from app.services.dx.github_dx import (
+            GitHubPullRequestCommentService,
+            GitHubStatusCheckService,
+        )
+
+        await GitHubStatusCheckService.publish_for_pr(
+            session, repository=repo, pr=pr, policy_mode="warn_medium", github_client=gh
+        )
+        await GitHubPullRequestCommentService.publish_or_update(
+            session, repository=repo, pr=pr, github_client=gh
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Skipping DX Check/Comment publish during PR analyze: %s", exc)
 
     await PolicyEngine.record_audit_log(
         session,
@@ -223,8 +426,13 @@ async def analyze_pull_request(
         details={
             "risk_score": pr.risk_score,
             "risk_level": pr.risk_level.value,
+            "assessment_key": assessment.assessment_key,
+            "seven_dim_score": assessment.risk_score,
             "confirmed_risks": len(pr.confirmed_risks),
             "potential_risks": len(pr.potential_risks),
+            "recommendations": list(analysis.get("recommendations") or []),
+            "unknowns": list(analysis.get("unknowns") or []),
+            "flag_agent_recommendation": flag_agent_rec,
             "head_sha": pr.head_sha,
         },
     )
@@ -257,7 +465,7 @@ async def analyze_pull_request(
 
     return PullRequestAnalyzeResponse(
         pull_request=PullRequestOut.model_validate(pr),
-        static_signals=list(analysis.get("static_signals") or []),
+        static_signals=[*list(analysis.get("static_signals") or []), *extra_signals],
     )
 
 
@@ -296,9 +504,19 @@ async def generate_pr_patch(
 
     base_files: dict[str, str] = dict(getattr(request.app.state, "repo_base_files", None) or {})
     files_data: list[dict[str, Any]] = []
+    pinned_ref = pr.head_sha or pr.head_branch
     try:
         gh = await build_github_client(request.app, session)
         if gh.token:
+            try:
+                live_pr = await gh.get_pull_request(repo.owner, repo.name, pr.github_pr_number)
+                live_sha = str((live_pr.get("head") or {}).get("sha") or "")
+                if live_sha:
+                    pr.head_sha = live_sha
+                    pinned_ref = live_sha
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("Skipping live head_sha check during patch generation: %s", exc)
+
             try:
                 files_data = await gh.get_pull_request_files(
                     repo.owner, repo.name, pr.github_pr_number
@@ -312,13 +530,16 @@ async def generate_pr_patch(
                 if tf and tf not in base_files:
                     try:
                         file_info = await gh.get_file_contents(
-                            repo.owner, repo.name, tf, ref=pr.head_branch
+                            repo.owner, repo.name, tf, ref=pinned_ref
                         )
                         base_files[tf] = str(file_info.get("content") or "")
                     except Exception as exc:  # noqa: BLE001
                         logger.debug("Skipping remote base file fetch for %s: %s", tf, exc)
     except Exception as exc:  # noqa: BLE001
         logger.debug("Skipping GitHub context fetch for patch generation: %s", exc)
+
+    existing_flag_keys = await _collect_existing_flag_keys(session, request, repo)
+    flag_exists = body.flag_key.strip().lower() in {k.lower() for k in existing_flag_keys}
 
     ws = await PolicyEngine.get_workspace_settings(session)
     gemini_client = build_gemini_client_from_app(request.app, model_override=ws.gemini_model)
@@ -346,6 +567,7 @@ async def generate_pr_patch(
         files_diff=patch_payload["files_diff"],
         generated_tests=patch_payload["generated_tests"],
         validation_status=ValidationStatus.PENDING,
+        validation_report={"target_head_sha": pr.head_sha, "flag_exists": flag_exists},
         status=CodeChangeStatus.DRAFT,
     )
     session.add(change)
@@ -435,6 +657,12 @@ async def create_draft_pr(
         f"ReleaseGuard AI Draft PR guarding `{change.flag_key}`.\n\n"
         f"{change.description or ''}"
     )
+    if change.pull_request_id:
+        orig_pr = await session.get(PullRequest, change.pull_request_id)
+        if orig_pr is not None and f"#{orig_pr.github_pr_number}" not in pr_body:
+            pr_body = (
+                f"{pr_body}\n\n---\nLinked Original PR: #{orig_pr.github_pr_number} ({orig_pr.html_url})"
+            )
 
     _, requires_approval = await PolicyEngine.evaluate_action(
         session,

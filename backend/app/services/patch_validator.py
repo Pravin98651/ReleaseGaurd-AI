@@ -18,6 +18,48 @@ from app.core.config import get_settings
 _DRIVE_PREFIX_RE = re.compile(r"^[A-Za-z]:")
 _JS_TS_EXTS = frozenset({".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"})
 _JS_EXEC_EXTS = frozenset({".js", ".mjs", ".cjs"})
+_BINARY_EXTENSIONS = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".webp",
+        ".ico",
+        ".pdf",
+        ".zip",
+        ".gz",
+        ".tar",
+        ".exe",
+        ".dll",
+        ".so",
+        ".dylib",
+        ".pyc",
+        ".pyo",
+        ".wasm",
+        ".bin",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".eot",
+    }
+)
+
+
+def _is_binary_content(content: str, raw_path: str) -> tuple[bool, str]:
+    """Detect binary extensions, null bytes, replacement chars, or dense control characters."""
+    suffix = Path(raw_path).suffix.lower()
+    if suffix in _BINARY_EXTENSIONS:
+        return True, f"Binary file extension '{suffix}' rejected."
+    if "\x00" in content:
+        return True, "Null byte detected in patch content (binary payload rejected)."
+    if "\ufffd" in content:
+        return True, "Corrupted UTF-8 replacement character detected in patch content."
+    if content:
+        ctrl_count = sum(1 for ch in content if ord(ch) < 32 and ch not in ("\n", "\r", "\t"))
+        if ctrl_count > 0 and (ctrl_count / len(content)) > 0.02:
+            return True, "Binary control character sequence detected in patch content."
+    return False, ""
 
 _SAFE_ENV_PASSTHROUGH = (
     "PATH",
@@ -135,6 +177,9 @@ def _validate_relative_path(raw_path: str, temp_root: Path) -> tuple[bool, str, 
         return False, "Empty or null-byte path.", None
 
     cleaned = raw_path.replace("\\", "/")
+    lower_cleaned = cleaned.lower()
+    if "%2e%2e" in lower_cleaned or "%2f" in lower_cleaned or "%5c" in lower_cleaned:
+        return False, f"Encoded path traversal rejected: '{raw_path}'.", None
     if cleaned.startswith("/") or _DRIVE_PREFIX_RE.match(cleaned):
         return False, f"Absolute path rejected: '{raw_path}'.", None
 
@@ -181,8 +226,12 @@ class PatchValidator:
         base_files: dict[str, str] | None = None,
         timeout_seconds: int | None = None,
         run_linters: bool = True,
+        expected_head_sha: str | None = None,
+        actual_head_sha: str | None = None,
+        expected_base_sha: str | None = None,
+        actual_base_sha: str | None = None,
     ) -> dict[str, Any]:
-        """Run path safety, overwrite safety, AST/syntax, and scrubbed ruff/pytest/eslint."""
+        """Run path safety, overwrite safety, SHA/binary checks, AST/syntax, and scrubbed linters."""
         timeout = (
             timeout_seconds
             if timeout_seconds is not None
@@ -196,9 +245,47 @@ class PatchValidator:
         path_safety_ok = True
         overwrite_ok = True
         ast_ok = True
+        binary_ok = True
+        sha_ok = True
         ruff_ok: bool | None = None
         pytest_ok: bool | None = None
         eslint_ok: bool | None = None
+
+        if expected_head_sha and actual_head_sha and expected_head_sha != actual_head_sha:
+            sha_ok = False
+            overwrite_ok = False
+            checks.append(
+                {
+                    "name": "target_sha_verification",
+                    "status": "failed",
+                    "detail": (
+                        f"Stale PR head SHA: expected {expected_head_sha[:12]}, "
+                        f"actual {actual_head_sha[:12]}."
+                    ),
+                }
+            )
+        elif expected_head_sha or actual_head_sha:
+            checks.append(
+                {
+                    "name": "target_sha_verification",
+                    "status": "passed",
+                    "detail": f"Verified target head SHA {(actual_head_sha or expected_head_sha or '')[:12]}.",
+                }
+            )
+
+        if expected_base_sha and actual_base_sha and expected_base_sha != actual_base_sha:
+            sha_ok = False
+            overwrite_ok = False
+            checks.append(
+                {
+                    "name": "base_sha_verification",
+                    "status": "failed",
+                    "detail": (
+                        f"Stale base branch SHA: expected {expected_base_sha[:12]}, "
+                        f"actual {actual_base_sha[:12]}."
+                    ),
+                }
+            )
 
         normalized_base: dict[str, str] | None = (
             {k.replace("\\", "/").lstrip("/"): _normalize_newlines(v) for k, v in base_files.items()}
@@ -236,6 +323,20 @@ class PatchValidator:
                     )
                     continue
                 norm_path = norm_or_err
+
+                is_bin_after, bin_reason_after = _is_binary_content(after_code, norm_path)
+                is_bin_before, bin_reason_before = _is_binary_content(before_code, norm_path)
+                if is_bin_after or is_bin_before:
+                    binary_ok = False
+                    ast_ok = False
+                    checks.append(
+                        {
+                            "name": f"binary_rejection:{norm_path}",
+                            "status": "failed",
+                            "detail": bin_reason_after or bin_reason_before,
+                        }
+                    )
+                    continue
 
                 if action == "create":
                     if normalized_base is not None and norm_path in normalized_base:
@@ -303,6 +404,18 @@ class PatchValidator:
                         }
                     )
                     continue
+                is_bin_test, bin_reason_test = _is_binary_content(content, norm_or_err)
+                if is_bin_test:
+                    binary_ok = False
+                    ast_ok = False
+                    checks.append(
+                        {
+                            "name": f"binary_rejection:{norm_or_err}",
+                            "status": "failed",
+                            "detail": bin_reason_test,
+                        }
+                    )
+                    continue
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(content, encoding="utf-8")
                 written_test_paths.append(dest)
@@ -331,8 +444,20 @@ class PatchValidator:
             js_ts_files: list[Path] = []
             for file_path in all_written:
                 suffix = file_path.suffix.lower()
-                text = file_path.read_text(encoding="utf-8")
                 rel = file_path.relative_to(temp_root).as_posix()
+                try:
+                    text = file_path.read_text(encoding="utf-8")
+                except UnicodeDecodeError as exc:
+                    binary_ok = False
+                    ast_ok = False
+                    checks.append(
+                        {
+                            "name": f"binary_rejection:{rel}",
+                            "status": "failed",
+                            "detail": f"Non-UTF-8 binary file rejected: {exc}",
+                        }
+                    )
+                    continue
 
                 if suffix == ".py":
                     py_files.append(file_path)
@@ -572,6 +697,8 @@ class PatchValidator:
             path_safety_ok
             and overwrite_ok
             and ast_ok
+            and binary_ok
+            and sha_ok
             and (ruff_ok is not False)
             and (pytest_ok is not False)
             and (eslint_ok is not False)
@@ -581,6 +708,8 @@ class PatchValidator:
             "ast_ok": ast_ok,
             "path_safety_ok": path_safety_ok,
             "overwrite_ok": overwrite_ok,
+            "binary_ok": binary_ok,
+            "sha_ok": sha_ok,
             "ruff_ok": ruff_ok,
             "pytest_ok": pytest_ok,
             "eslint_ok": eslint_ok,
@@ -597,6 +726,10 @@ def validate_patch_isolated(
     base_files: dict[str, str] | None = None,
     timeout_seconds: int | None = None,
     run_linters: bool = True,
+    expected_head_sha: str | None = None,
+    actual_head_sha: str | None = None,
+    expected_base_sha: str | None = None,
+    actual_base_sha: str | None = None,
 ) -> dict[str, Any]:
     """Convenience function calling PatchValidator.validate."""
     return PatchValidator.validate(
@@ -605,4 +738,8 @@ def validate_patch_isolated(
         base_files=base_files,
         timeout_seconds=timeout_seconds,
         run_linters=run_linters,
+        expected_head_sha=expected_head_sha,
+        actual_head_sha=actual_head_sha,
+        expected_base_sha=expected_base_sha,
+        actual_base_sha=actual_base_sha,
     )

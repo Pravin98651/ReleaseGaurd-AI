@@ -223,6 +223,83 @@ export interface FlagOpportunity {
   target_files: string[];
   rationale: string;
   recommended_rollout?: string | null;
+  already_exists?: boolean;
+  existing_flag_key?: string | null;
+  dedup_action?: "reuse_existing" | "create_new" | string | null;
+}
+
+export interface PrRecommendationItem {
+  title: string;
+  priority?: string;
+  action: string;
+  target_file?: string | null;
+}
+
+export interface PrUnknownItem {
+  title: string;
+  area?: string;
+  reason: string;
+  impact?: string | null;
+}
+
+export interface FlagAgentRecommendation {
+  recommended_agent?: string;
+  action: "reuse_existing_flag" | "create_non_prod_flag" | string;
+  flag_key: string;
+  flag_type?: string;
+  already_exists?: boolean;
+  existing_flag_key?: string | null;
+  target_files?: string[];
+  recommended_rollout?: string | null;
+  rationale: string;
+  requires_approval?: boolean;
+}
+
+export interface PrRiskDimensionSummary {
+  dimension_key: string;
+  dimension_name: string;
+  score?: number | null;
+  weight?: number | null;
+  weighted_contribution?: number | null;
+  severity?: string | null;
+  status?: string | null;
+  explanations?: string[];
+  limitations?: string[];
+}
+
+export interface PrRiskAssessmentSummary {
+  id: string;
+  assessment_key: string;
+  overall_risk_score?: number | null;
+  risk_classification?: string | null;
+  commit_sha?: string | null;
+  dimensions: PrRiskDimensionSummary[];
+}
+
+export interface PrDxStatus {
+  check_run?: {
+    status: string;
+    conclusion?: string | null;
+    policy_mode?: string | null;
+    commit_sha?: string | null;
+  } | null;
+  comment?: {
+    publish_status: string;
+    commit_sha?: string | null;
+    external_comment_id?: number | string | null;
+  } | null;
+}
+
+export interface PrDiffSummary {
+  files_count?: number;
+  confirmed_risks_count?: number;
+  potential_risks_count?: number;
+  flag_opportunities_count?: number;
+  recommendations?: Array<PrRecommendationItem | string>;
+  unknowns?: Array<PrUnknownItem | string>;
+  flag_agent_recommendation?: FlagAgentRecommendation | null;
+  risk_assessment?: PrRiskAssessmentSummary | null;
+  dx_status?: PrDxStatus | null;
 }
 
 export interface FileDiffItem {
@@ -250,6 +327,11 @@ export interface ValidationReport {
   ast_ok?: boolean;
   path_safety_ok?: boolean;
   overwrite_ok?: boolean;
+  binary_ok?: boolean;
+  sha_ok?: boolean;
+  target_head_sha?: string | null;
+  expected_head_sha?: string | null;
+  actual_head_sha?: string | null;
   ruff_ok?: boolean | null;
   pytest_ok?: boolean | null;
   eslint_ok?: boolean | null;
@@ -303,7 +385,7 @@ export interface PullRequest {
   flag_opportunities: FlagOpportunity[];
   code_changes?: CodeChange[];
   changed_files?: ChangedFileItem[];
-  diff_summary?: string | Record<string, unknown> | null;
+  diff_summary?: PrDiffSummary | string | Record<string, unknown> | null;
   analyzed_at?: string | null;
   created_at: string;
   updated_at: string;

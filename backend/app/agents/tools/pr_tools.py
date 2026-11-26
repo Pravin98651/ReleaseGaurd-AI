@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 import difflib
+import logging
 import re
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import select
+
+logger = logging.getLogger("releaseguard.agents.pr_tools")
+
+from app.agents.specialists.pr_agent import annotate_flag_opportunities_with_existing
 from app.agents.tools.context import ToolExecutionContext
 from app.core.database import utcnow
 from app.core.security import MAX_FILE_CHARS, wrap_untrusted
@@ -216,18 +222,30 @@ async def handle_analyze_pr_risk_and_opportunities(
 
     # Verify cited file paths against actual PR changed files when GitHub is reachable.
     changed_paths: set[str] | None = None
+    files_override: list[dict[str, Any]] = []
     if repo is not None:
         try:
             client = await ctx.get_github_client()
             files = await client.get_pull_request_files(
                 repo.owner, repo.name, pr.github_pr_number
             )
+            files_override = list(files)
             changed_paths = {str(f.get("filename", "")) for f in files if f.get("filename")}
         except Exception:  # noqa: BLE001
             changed_paths = None
 
     confirmed: list[dict[str, Any]] = []
     potential = [r.model_dump(mode="json") for r in args.potential_risks]
+
+    if changed_paths is None and args.confirmed_risks:
+        potential.append(
+            {
+                "title": "GitHub changed-files verification unavailable",
+                "severity": "low",
+                "assumption": "Could not verify confirmed_risks file paths against live GitHub PR files.",
+                "verification_needed": "Re-run analysis once GitHub API access is available.",
+            }
+        )
 
     for risk in args.confirmed_risks:
         risk_dict = risk.model_dump(mode="json")
@@ -249,7 +267,11 @@ async def handle_analyze_pr_risk_and_opportunities(
         else:
             confirmed.append(risk_dict)
 
-    opps = [o.model_dump(mode="json") for o in args.flag_opportunities]
+    existing_keys = set(
+        (await ctx.session.execute(select(FeatureFlag.key))).scalars().all()
+    )
+    raw_opps = [o.model_dump(mode="json") for o in args.flag_opportunities]
+    opps, _ = annotate_flag_opportunities_with_existing(raw_opps, existing_keys)
 
     pr.risk_score = args.risk_score
     pr.risk_level = args.risk_level
@@ -259,6 +281,22 @@ async def handle_analyze_pr_risk_and_opportunities(
     pr.flag_opportunities = opps
     pr.analysis_status = AnalysisStatus.COMPLETED
     pr.analyzed_at = utcnow()
+    await ctx.session.flush()
+
+    try:
+        from app.services.risk_engine.risk_service import IntelligentReleaseRiskService
+
+        await IntelligentReleaseRiskService.assess_release(
+            ctx.session,
+            pull_request_id=pr.id,
+            repository_id=pr.repository_id,
+            target_environment="development",
+            files_override=files_override or None,
+            create_execution=False,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Skipping 7-dim risk assessment in pr_tools: %s", exc)
+
     await ctx.session.commit()
     await ctx.session.refresh(pr)
 
@@ -334,11 +372,37 @@ async def handle_validate_patch_isolated(
         if derived_base:
             base_files = derived_base
 
+    expected_head_sha: str | None = (change.validation_report or {}).get("target_head_sha")
+    actual_head_sha: str | None = None
+    if change.pull_request_id:
+        pr = await ctx.session.get(PullRequest, change.pull_request_id)
+        if pr is not None:
+            actual_head_sha = pr.head_sha
+            if expected_head_sha is None:
+                expected_head_sha = pr.head_sha
+            repo = await ctx.session.get(Repository, change.repository_id)
+            if repo is not None:
+                try:
+                    gh = await ctx.get_github_client()
+                    if gh.token:
+                        live_pr = await gh.get_pull_request(
+                            repo.owner, repo.name, pr.github_pr_number
+                        )
+                        live_sha = str((live_pr.get("head") or {}).get("sha") or "")
+                        if live_sha:
+                            actual_head_sha = live_sha
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("Skipping live head_sha check in validate_patch_isolated: %s", exc)
+
     report = PatchValidator.validate(
         files_diff=list(change.files_diff or []),
         generated_tests=list(change.generated_tests or []),
         base_files=base_files,
+        expected_head_sha=expected_head_sha,
+        actual_head_sha=actual_head_sha,
     )
+    if expected_head_sha or actual_head_sha:
+        report["target_head_sha"] = actual_head_sha or expected_head_sha
     passed = report.get("validation_status") == "passed"
     change.validation_status = ValidationStatus.PASSED if passed else ValidationStatus.FAILED
     change.validation_report = report
@@ -370,6 +434,18 @@ async def handle_github_create_branch_and_draft_pr(
     if repo is None:
         raise ValueError(f"Repository {change.repository_id} not found.")
 
+    pr: PullRequest | None = (
+        await ctx.session.get(PullRequest, change.pull_request_id)
+        if change.pull_request_id
+        else None
+    )
+    validated_head_sha = (change.validation_report or {}).get("target_head_sha")
+    if pr is not None and validated_head_sha and pr.head_sha != validated_head_sha:
+        raise ValueError(
+            f"Stale PR head SHA: patch was validated for {validated_head_sha[:12]}, "
+            f"but PR is now at {pr.head_sha[:12]}. Re-run patch validation."
+        )
+
     files_to_commit: list[dict[str, str]] = [
         {"path": str(item["file_path"]), "content": str(item["after_code"])}
         for item in (change.files_diff or [])
@@ -377,6 +453,14 @@ async def handle_github_create_branch_and_draft_pr(
     for test_item in change.generated_tests or []:
         files_to_commit.append(
             {"path": str(test_item["file_path"]), "content": str(test_item["content"])}
+        )
+
+    base_body = args.pr_body or f"Generated by ReleaseGuard AI for flag `{change.flag_key}`."
+    if pr is not None and f"#{pr.github_pr_number}" not in base_body:
+        base_body = (
+            f"{base_body}\n\n"
+            f"---\n"
+            f"Linked Original PR: #{pr.github_pr_number} ({pr.html_url})"
         )
 
     client = await ctx.get_github_client()
@@ -387,7 +471,7 @@ async def handle_github_create_branch_and_draft_pr(
         files=files_to_commit,
         commit_message=f"chore(releaseguard): {args.pr_title}",
         pr_title=args.pr_title,
-        pr_body=args.pr_body or f"Generated by ReleaseGuard AI for flag `{change.flag_key}`.",
+        pr_body=base_body,
     )
 
     change.draft_pr_number = int(result["pr_number"])
@@ -396,6 +480,22 @@ async def handle_github_create_branch_and_draft_pr(
     change.status = CodeChangeStatus.PR_OPENED
     await ctx.session.commit()
     await ctx.session.refresh(change)
+
+    if pr is not None and client.token:
+        try:
+            await client.create_issue_comment(
+                owner=repo.owner,
+                repo=repo.name,
+                issue_number=pr.github_pr_number,
+                body=(
+                    f"<!-- releaseguard-ai:draft-pr -->\n"
+                    f"ReleaseGuard AI opened Draft PR #{change.draft_pr_number} "
+                    f"(`{change.draft_branch_name}`) to guard `{change.flag_key}`: "
+                    f"{change.draft_pr_url}"
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Skipping original PR comment link after Draft PR creation: %s", exc)
 
     return GitHubCreateBranchAndDraftPROutput(
         code_change_id=change.id,

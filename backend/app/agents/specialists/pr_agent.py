@@ -26,34 +26,90 @@ YOUR RESPONSIBILITIES:
 6. Open Draft PRs (`draft=true`) ONLY. You have ZERO merge capability and must NEVER attempt to merge PRs or touch production feature flags.
 """.strip()
 
-_RISK_PATTERNS: list[tuple[re.Pattern[str], str, RiskLevel, int, str]] = [
+_RISK_PATTERNS: list[tuple[str, re.Pattern[str], str, RiskLevel, int, str, str]] = [
     (
+        "payment",
         re.compile(r"(checkout|payment|billing|stripe|refund|charge|invoice|promo)", re.IGNORECASE),
         "Payment / Checkout Flow Mutation",
         RiskLevel.HIGH,
         35,
         "Wrap new checkout/payment logic behind a Flagsmith feature flag with safe legacy fallback.",
+        "Gate payment/checkout code path behind a Flagsmith boolean or multivariate flag and verify fallback totals.",
     ),
     (
-        re.compile(r"(auth|jwt|oauth|token|permission|rbac|secret|password)", re.IGNORECASE),
+        "auth",
+        re.compile(r"(auth|jwt|oauth|token|permission|rbac|secret|password|session)", re.IGNORECASE),
         "Authentication / Authorization Logic Change",
         RiskLevel.HIGH,
         30,
         "Audit access checks and gate new auth paths behind a non-prod verified flag.",
+        "Review RBAC/token checks and add regression tests for unauthorized and expired-token cases.",
     ),
     (
-        re.compile(r"(alembic|migration|alter\s+table|drop\s+table|drop\s+column)", re.IGNORECASE),
+        "security",
+        re.compile(
+            r"(eval\s*\(|exec\s*\(|pickle\.loads|shell\s*=\s*True|verify\s*=\s*False|innerHTML|dangerouslySetInnerHTML|sql\s*\+)",
+            re.IGNORECASE,
+        ),
+        "Security / Injection / Unsafe Execution Pattern",
+        RiskLevel.CRITICAL,
+        40,
+        "Eliminate unsafe dynamic execution/TLS bypass and sanitize all untrusted inputs.",
+        "Replace unsafe sinks with parameterized queries, safe parsers, and verified TLS.",
+    ),
+    (
+        "migrations",
+        re.compile(r"(alembic|migration|alter\s+table|drop\s+table|drop\s+column|truncate\s+table)", re.IGNORECASE),
         "Database Schema / Migration Modification",
         RiskLevel.HIGH,
         25,
         "Ensure backward-compatible expand-and-contract rollout before enabling feature code.",
+        "Run migration dry-run on staging snapshot and ensure old application code remains compatible.",
     ),
     (
-        re.compile(r"(except\s+Exception\s*:\s*pass|catch\s*\([^)]*\)\s*\{\s*\})", re.IGNORECASE),
+        "deps",
+        re.compile(r"(requirements.*\.txt|pyproject\.toml|package\.json|package-lock\.json|poetry\.lock|Dockerfile)", re.IGNORECASE),
+        "Dependency / Build Manifest Change",
+        RiskLevel.MEDIUM,
+        15,
+        "Pin dependency versions/hashes and verify transitive security advisories.",
+        "Run dependency audit and verify lockfile integrity before rollout.",
+    ),
+    (
+        "api",
+        re.compile(r"(@router\.|APIRouter|response_model|status_code|/api/v\d+|openapi|graphql)", re.IGNORECASE),
+        "Public API Contract / Route Modification",
+        RiskLevel.MEDIUM,
+        18,
+        "Verify backward compatibility for existing API consumers and response schemas.",
+        "Add API contract tests validating request/response schemas and status codes.",
+    ),
+    (
+        "perf",
+        re.compile(r"(time\.sleep\(|while\s+True:|SELECT\s+\*|N\+1|unbounded)", re.IGNORECASE),
+        "Potential Performance / Blocking Operation",
+        RiskLevel.MEDIUM,
+        15,
+        "Avoid blocking calls or unbounded queries on hot request paths.",
+        "Profile query latency and add pagination, timeouts, or async offloading.",
+    ),
+    (
+        "error_handling",
+        re.compile(r"(except\s+Exception\s*:\s*pass|except\s*:\s*pass|catch\s*\([^)]*\)\s*\{\s*\})", re.IGNORECASE),
         "Swallowed Exception / Silent Failure Handler",
         RiskLevel.MEDIUM,
         15,
         "Log structured failure context and preserve payment_failed telemetry emission.",
+        "Replace silent exception handlers with structured error logging and explicit fallback telemetry.",
+    ),
+    (
+        "breaking_changes",
+        re.compile(r"(deprecated|breaking\s+change|removed\s+endpoint|drop_column|rename_column)", re.IGNORECASE),
+        "Potential Breaking Interface or Schema Change",
+        RiskLevel.HIGH,
+        25,
+        "Preserve compatibility shims or versioned endpoints during transition window.",
+        "Provide a deprecation window and dual-read/dual-write compatibility before removal.",
     ),
 ]
 
@@ -95,7 +151,10 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
     static_signals: list[str] = []
     confirmed_risks: list[dict[str, Any]] = []
     potential_risks: list[dict[str, Any]] = []
+    recommendations: list[dict[str, Any]] = []
+    unknowns: list[dict[str, Any]] = []
     flag_opportunities: list[dict[str, Any]] = []
+    categories_detected: list[str] = []
 
     total_changes = 0
     has_test_changes = False
@@ -105,7 +164,9 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
 
     for item in files_data:
         filename = str(item.get("filename", ""))
-        patch = str(item.get("patch") or "")
+        status = str(item.get("status") or "modified")
+        raw_patch = item.get("patch")
+        patch = str(raw_patch or "")
         additions = int(item.get("additions") or 0)
         deletions = int(item.get("deletions") or 0)
         total_changes += additions + deletions
@@ -114,6 +175,17 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
             has_test_changes = True
         if any(tok in patch for tok in _UNFLAGGED_MARKERS):
             has_flagsmith_guard = True
+
+        if (raw_patch is None or (not patch.strip() and (additions + deletions) > 0)) and status != "removed":
+            static_signals.append(f"binary_or_truncated_diff:{filename}")
+            unknowns.append(
+                {
+                    "title": f"Uninspected diff for {filename}",
+                    "area": "diff_retrieval",
+                    "reason": "GitHub returned no unified patch (binary asset or oversized/truncated diff).",
+                    "impact": "Line-level security and logic checks could not be performed on this file.",
+                }
+            )
 
         added_lines = _parse_patch_added_lines(patch)
         if not added_lines and patch:
@@ -129,6 +201,8 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
                         len(node.body) == 1 and isinstance(node.body[0], ast.Pass)
                     ):
                         static_signals.append(f"ast_silent_except:{filename}:{node.lineno}")
+                        if "error_handling" not in categories_detected:
+                            categories_detected.append("error_handling")
                         confirmed_risks.append(
                             {
                                 "title": "Silent except: pass detected via Python AST",
@@ -144,7 +218,7 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
                 # Partial diff hunks are often not standalone modules; skip AST failure
                 pass
 
-        for regex, title, sev, weight, mitigation in _RISK_PATTERNS:
+        for category, regex, title, sev, weight, mitigation, rec_action in _RISK_PATTERNS:
             matched_line: tuple[int, str] | None = None
             if regex.search(filename):
                 matched_line = added_lines[0] if added_lines else (1, filename)
@@ -155,7 +229,9 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
                         break
 
             if matched_line is not None:
-                static_signals.append(f"risk_marker:{title}:{filename}:L{matched_line[0]}")
+                static_signals.append(f"risk_marker:{category}:{title}:{filename}:L{matched_line[0]}")
+                if category not in categories_detected:
+                    categories_detected.append(category)
                 confirmed_risks.append(
                     {
                         "title": title,
@@ -164,6 +240,14 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
                         "line_range": f"L{matched_line[0]}",
                         "evidence": f"Observed `{matched_line[1][:140]}` in {filename} at line {matched_line[0]}.",
                         "mitigation": mitigation,
+                    }
+                )
+                recommendations.append(
+                    {
+                        "title": f"Mitigate {category} risk in {filename}",
+                        "priority": "high" if sev in (RiskLevel.HIGH, RiskLevel.CRITICAL) else "medium",
+                        "action": rec_action,
+                        "target_file": filename,
                     }
                 )
                 if filename not in risky_files:
@@ -184,6 +268,8 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
 
     if files_data and not has_test_changes:
         static_signals.append("missing_test_updates")
+        if "missing_tests" not in categories_detected:
+            categories_detected.append("missing_tests")
         score += 12
         potential_risks.append(
             {
@@ -191,6 +277,14 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
                 "severity": RiskLevel.MEDIUM.value,
                 "assumption": "Existing suite might not cover newly introduced branches or failure states.",
                 "verification_needed": "Add isolated unit/integration tests covering both control and treatment paths.",
+            }
+        )
+        recommendations.append(
+            {
+                "title": "Add test coverage for changed modules",
+                "priority": "high",
+                "action": "Add unit and integration tests covering happy-path, flag-disabled fallback, and failure states.",
+                "target_file": risky_files[0] if risky_files else None,
             }
         )
 
@@ -218,6 +312,14 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
                 "recommended_rollout": "10% -> 25% -> 50% -> 75% -> 100%",
             }
         )
+        recommendations.append(
+            {
+                "title": f"Wrap risky changes behind Flagsmith flag `{suggested_key}`",
+                "priority": "high",
+                "action": "Generate a Flagsmith-guarded patch + tests and provision the flag in non-prod via Flag Agent.",
+                "target_file": risky_files[0],
+            }
+        )
 
     if not potential_risks:
         potential_risks.append(
@@ -229,16 +331,70 @@ def extract_static_pr_signals(files_data: list[dict[str, Any]]) -> dict[str, Any
             }
         )
 
+    unknowns.append(
+        {
+            "title": "Runtime environment & unchanged caller behavior",
+            "area": "runtime_context",
+            "reason": "Static PR diff does not expose production traffic distribution, live Flagsmith overrides, or unretrieved callers.",
+            "impact": "Verify in staging with live Flagsmith evaluation and canary telemetry.",
+        }
+    )
+
     bounded_score = min(100, max(5, score))
     return {
         "static_signals": static_signals,
+        "categories_detected": categories_detected,
         "risk_score": bounded_score,
         "risk_level": _score_to_risk_level(bounded_score).value,
         "confirmed_risks": confirmed_risks,
         "potential_risks": potential_risks,
+        "recommendations": recommendations,
+        "unknowns": unknowns,
         "flag_opportunities": flag_opportunities,
         "changed_files": [str(f.get("filename", "")) for f in files_data if f.get("filename")],
     }
+
+
+def annotate_flag_opportunities_with_existing(
+    flag_opportunities: list[dict[str, Any]],
+    existing_flag_keys: set[str],
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+    """Check suggested flags against existing Flagsmith/DB flags and emit a Flag Agent handoff."""
+    normalized_existing = {k.strip().lower(): k for k in existing_flag_keys if k}
+    annotated: list[dict[str, Any]] = []
+    for opp in flag_opportunities:
+        item = dict(opp)
+        raw_key = str(item.get("suggested_flag_key") or item.get("flag_key") or "").strip()
+        norm_key = raw_key.lower()
+        existing_match = normalized_existing.get(norm_key)
+        already_exists = existing_match is not None
+        item["suggested_flag_key"] = raw_key
+        item["already_exists"] = already_exists
+        item["existing_flag_key"] = existing_match
+        item["dedup_action"] = "reuse_existing" if already_exists else "create_new"
+        annotated.append(item)
+
+    flag_agent_rec: dict[str, Any] | None = None
+    if annotated:
+        primary = annotated[0]
+        exists = bool(primary.get("already_exists"))
+        flag_agent_rec = {
+            "recommended_agent": "flag_agent",
+            "action": "reuse_existing_flag" if exists else "create_non_prod_flag",
+            "flag_key": primary["suggested_flag_key"],
+            "flag_type": str(primary.get("flag_type") or FlagType.STANDARD.value),
+            "already_exists": exists,
+            "existing_flag_key": primary.get("existing_flag_key"),
+            "target_files": list(primary.get("target_files") or []),
+            "recommended_rollout": str(primary.get("recommended_rollout") or "10% -> 25% -> 50% -> 75% -> 100%"),
+            "rationale": (
+                f"Flag `{primary['suggested_flag_key']}` already exists; reuse it instead of creating a duplicate."
+                if exists
+                else f"Create non-prod Flagsmith flag `{primary['suggested_flag_key']}` before opening/merging rollout."
+            ),
+            "requires_approval": not exists,
+        }
+    return annotated, flag_agent_rec
 
 
 async def analyze_pr_with_static_and_gemini(
@@ -267,6 +423,9 @@ async def analyze_pr_with_static_and_gemini(
         "analysis_summary": " ".join(summary_parts),
         "confirmed_risks": baseline["confirmed_risks"],
         "potential_risks": baseline["potential_risks"],
+        "recommendations": baseline["recommendations"],
+        "unknowns": baseline["unknowns"],
+        "categories_detected": baseline["categories_detected"],
         "flag_opportunities": baseline["flag_opportunities"],
         "static_signals": baseline["static_signals"],
         "analysis_mode": "static_only",
@@ -285,18 +444,20 @@ async def analyze_pr_with_static_and_gemini(
         prompt = (
             "Analyze the following sandboxed Pull Request metadata and unified diff across:\n"
             "1) PR objective and modified functionality\n"
-            "2) Affected files, downstream components, and dependencies\n"
-            "3) API, database/migration, and security-sensitive changes\n"
-            "4) Backward compatibility, performance implications, release risks, and remediation\n"
-            "5) Feature flag wrapping opportunities.\n"
-            "Return STRICT JSON with keys: summary (str covering objective, modified functionality, "
-            "dependencies/API/DB/security impact, backward compatibility, and performance), "
-            "risk_score (int 0..100), risk_level ('low'|'medium'|'high'|'critical'), confirmed_risks (list of "
-            "{title, severity, file_path, line_range, evidence, mitigation}), "
-            "potential_risks (list of {title, severity, assumption, verification_needed}), "
-            "flag_opportunities (list of {suggested_flag_key, flag_type, target_files, rationale, recommended_rollout}).\n"
-            "CRITICAL: Only place findings with direct file_path + code evidence from the diff into confirmed_risks; "
-            "place assumptions or unverified hypotheses in potential_risks.\n"
+            "2) Security, authentication/authorization, payment/checkout, and database migrations\n"
+            "3) Dependencies, API contracts, performance, error handling, breaking changes, and missing tests\n"
+            "4) Feature flag wrapping opportunities.\n"
+            "Return STRICT JSON with keys:\n"
+            "  summary (str covering objective, modified functionality, dependencies/API/DB/security impact, "
+            "backward compatibility, and performance),\n"
+            "  confirmed_risks (list of {title, severity, file_path, line_range, evidence, mitigation}),\n"
+            "  potential_risks (list of {title, severity, assumption, verification_needed}),\n"
+            "  recommendations (list of {title, priority, action, target_file}),\n"
+            "  unknowns (list of {title, area, reason, impact}),\n"
+            "  flag_opportunities (list of {suggested_flag_key, flag_type, target_files, rationale, recommended_rollout}).\n"
+            "CRITICAL: Do NOT invent numeric risk scores. Only place findings with direct file_path + code evidence "
+            "from the diff into confirmed_risks; place assumptions in potential_risks; place uninspected/missing "
+            "context in unknowns.\n"
             f"Deterministic static signals already observed: {json.dumps(baseline['static_signals'])}\n\n"
             f"{wrap_untrusted('github_pr_title', meta, pr_title, max_chars=2000)}\n"
             f"{wrap_untrusted('github_pr_body', meta, pr_body or '', max_chars=8000)}\n"
@@ -343,15 +504,23 @@ async def analyze_pr_with_static_and_gemini(
 
                     if parsed.get("summary"):
                         result["analysis_summary"] = str(parsed["summary"])
-                    if isinstance(parsed.get("risk_score"), int):
-                        result["risk_score"] = max(0, min(100, int(parsed["risk_score"])))
-                        result["risk_level"] = str(
-                            parsed.get("risk_level") or _score_to_risk_level(result["risk_score"]).value
-                        ).lower()
+                    # Never let Gemini invent or override deterministic risk_score / risk_level.
                     if verified_confirmed:
                         result["confirmed_risks"] = verified_confirmed
                     if extra_potential:
                         result["potential_risks"] = extra_potential
+                    if isinstance(parsed.get("recommendations"), list) and parsed["recommendations"]:
+                        seen_recs = {str(r.get("title", "")).lower() for r in result["recommendations"]}
+                        for rec in parsed["recommendations"]:
+                            if isinstance(rec, dict) and str(rec.get("title", "")).lower() not in seen_recs:
+                                result["recommendations"].append(rec)
+                                seen_recs.add(str(rec.get("title", "")).lower())
+                    if isinstance(parsed.get("unknowns"), list) and parsed["unknowns"]:
+                        seen_unk = {str(u.get("title", "")).lower() for u in result["unknowns"]}
+                        for unk in parsed["unknowns"]:
+                            if isinstance(unk, dict) and str(unk.get("title", "")).lower() not in seen_unk:
+                                result["unknowns"].append(unk)
+                                seen_unk.add(str(unk.get("title", "")).lower())
                     if parsed.get("flag_opportunities"):
                         result["flag_opportunities"] = list(parsed["flag_opportunities"])
                     result["analysis_mode"] = "gemini_ai"
