@@ -101,3 +101,37 @@
 - `open_github_prs_after`: `0` (all temporary demo PRs `#11`, `#12`, `#13` closed and branches deleted).
 - Flagsmith Development `#120019` (`checkout_experience_v2`): restored to `34 / 33 / 33` (`control` / `one_page_checkout` / `simplified_checkout`).
 - Flagsmith Production `#120020` and GitHub `main`: verified unchanged after every run.
+
+---
+
+## 5. Bayesian Cohort Accounting & 3-Arm vs. 2-Arm Reconciliation
+
+> **Reconciliation Note:** Sections 1–4 preserve the historical output of `phase1_live_proof.py` (executed when Alembic head was `0013_bigint_github_ids`; current repository head is `0015_gemini_35_default`). This section reconciles the exact participant, evaluation, and variant accounting.
+
+### Why `480` Flagsmith Edge Evaluations Yield `120` Participants per Arm (`720` Events)
+1. **3-Arm Flagsmith Split vs. 2-Arm Bayesian Engine (Known Limitation):**
+   - Flagsmith Experiment `#503` (`checkout_experience_v2`, Flag `#304842`) is configured in Development (`#120019`) with **3 variants**: `control` (`34%`), `one_page_checkout` (`33%`), and `simplified_checkout` (`33%`).
+   - ReleaseGuard AI's pure-Python Bayesian engine (`backend/app/analytics/bayesian.py` — `BayesianCountsInput`, `aggregate_experiment_events()`) is strictly a **two-arm** (`control_variation` vs. `treatment_variation`) Beta-Binomial comparator. It does **not** perform 3-way multi-arm Bayesian comparisons; any unmapped third-arm events (`simplified_checkout`) are counted in `unattributed_events` and excluded from the pairwise posterior.
+2. **Identity Assignment & Sampling (`_assign_live_flagsmith_participants`):**
+   - For Scenario A (`min_per_arm=120`), `phase1_live_proof.py` evaluates `batch_size = max(40, 120 * 4) = 480` distinct identities against live Flagsmith Edge (`GET /identities/`).
+   - Across the 3-way split (~34% / 33% / 33%), roughly ~160 identities land in each arm. The runner selects the first **`120` unique `control` participants** and **`120` unique `one_page_checkout` participants** (`240` unique participants total), discarding `simplified_checkout` and excess evaluations.
+3. **Synthetic Event Generation & Deduplication (`_build_cohort_events` & `aggregate_experiment_events`):**
+   - For each of the `240` selected participants, `_build_cohort_events()` emits **`3` events** (`feature_variation_assigned`, `checkout_started`, and one terminal outcome: `checkout_completed`, `payment_failed`, or `checkout_abandoned`), all tagged `synthetic_test_traffic: True`.
+   - `240 unique participants × 3 events/participant = 720 raw events` ingested via `POST /api/v1/events/ingest`.
+   - `aggregate_experiment_events()` deduplicates by `event_id`, attributes each `user_identifier` once to their earliest `feature_variation_assigned` arm, and counts unique participants per outcome (`0 <= k <= n`). Repeat evaluations never inflate `n`.
+   - `min_exposures = 100` is enforced on **unique participants per arm** (`control_exposures` and `treatment_exposures`).
+   - Live Flagsmith `GET /experiments/503/results` returns `variants: {}` (`is_final: false`); ReleaseGuard's Bayesian calculations run deterministically on the `/api/v1/events/ingest` PostgreSQL cohort.
+
+### Explicit Cohort Accounting Table (Per Run)
+
+| Metric Label | Scenario C (Insufficient Data) | Scenario B (Guardrail Breach) | Scenario A (Winning Variant) |
+|---|---:|---:|---:|
+| **Total Flagsmith Edge Evaluations** | `100` *(batch=100 across 3 arms)* | `440` *(batch=440 across 3 arms)* | `480` *(batch=480 across 3 arms)* |
+| **Unique Participants (Total in 2-Arm Analysis)** | `50` | `220` | `240` |
+| **Control Sample Size (`control` unique participants)** | `25` | `110` | `120` |
+| **Treatment Sample Size (`one_page_checkout` unique participants)** | `25` | `110` | `120` |
+| **Valid Exposures (`feature_variation_assigned`, deduplicated)** | `25` ctrl / `25` trt | `110` ctrl / `110` trt | `120` ctrl / `120` trt |
+| **Total Ingested Synthetic Events (`3` per participant)** | `150` | `660` | `720` |
+| **Conversion Events (`checkout_completed`, unique users)** | `3` ctrl / `7` trt | — *(blocked by guardrail)* | `14` ctrl (`11.67%`) / `34` trt (`28.33%`) |
+| **Guardrail Events (`payment_failed`, unique users)** | `0` ctrl / `0` trt | `1` ctrl (`0.91%`) / `18` trt (`16.36%`) | `<=` threshold *(no breach)* |
+| **Bayesian Outcome & Promotion Gate** | `INSUFFICIENT_DATA` (`409 EXPERIMENT_NOT_READY`) | `GUARDRAIL_BREACHED` (`409 GUARDRAIL_BREACHED`) | `VARIANT_WINS` (`P=0.99934`, `loss=7e-06` -> `202`) |
