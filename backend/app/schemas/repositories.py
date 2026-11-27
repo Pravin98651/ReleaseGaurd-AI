@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.models.enums import (
     AnalysisStatus,
@@ -101,6 +101,16 @@ class FlagOpportunitySchema(BaseModel):
     target_files: list[str] = Field(default_factory=list)
     rationale: str
     recommended_rollout: str = "10% -> 25% -> 50% -> 75% -> 100%"
+
+    @field_validator("flag_type", mode="before")
+    @classmethod
+    def _normalize_legacy_flag_type(cls, value: Any) -> FlagType:
+        if isinstance(value, FlagType):
+            return value
+        norm = str(value or "STANDARD").strip().upper()
+        if norm in {"MULTIVARIATE", "MV", "VARIANT", "AB_TEST"}:
+            return FlagType.MULTIVARIATE
+        return FlagType.STANDARD
 
 
 class PullRequestOut(ORMBaseModel):

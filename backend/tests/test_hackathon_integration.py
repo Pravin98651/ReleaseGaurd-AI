@@ -195,3 +195,28 @@ async def test_admin_cannot_self_approve_category_c(
         )
         assert r.status_code == 403
         assert r.json()["error"]["code"] == "SELF_APPROVAL_FORBIDDEN"
+
+
+def test_flag_opportunity_schema_normalizes_legacy_boolean_flag_type() -> None:
+    """Regression test: legacy DB rows with flag_type='boolean' serialize cleanly."""
+    from app.models.enums import FlagType
+    from app.schemas.repositories import FlagOpportunitySchema
+
+    item = FlagOpportunitySchema.model_validate(
+        {
+            "suggested_flag_key": "express_checkout_promo",
+            "flag_type": "boolean",
+            "target_files": ["demo-app/backend/app/checkout.py"],
+            "rationale": "Guard express promo path",
+        }
+    )
+    assert item.flag_type == FlagType.STANDARD
+
+    mv = FlagOpportunitySchema.model_validate(
+        {
+            "suggested_flag_key": "checkout_exp",
+            "flag_type": "multivariate",
+            "rationale": "Compare variants",
+        }
+    )
+    assert mv.flag_type == FlagType.MULTIVARIATE
