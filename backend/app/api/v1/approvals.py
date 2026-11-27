@@ -145,12 +145,11 @@ async def approve_action(
         and approval.policy_category == ApprovalCategory.C
         and approval.requested_by_id is not None
         and approval.requested_by_id == operator.id
-        and operator.role.value != "admin"
     ):
         raise APIException(
             403,
             "SELF_APPROVAL_FORBIDDEN",
-            "Category C production approvals require an independent approver when authentication is enabled.",
+            "Category C approvals require an independent approver (requested_by_id != decided_by_id).",
         )
 
     ctx = await build_tool_context(request.app, session, user_id=operator.id)

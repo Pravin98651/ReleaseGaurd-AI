@@ -128,3 +128,70 @@ async def test_explain_identity_redacts_sensitive_traits_and_distinguishes_evide
 
 async def _async_val(val):
     return val
+
+
+@pytest.mark.asyncio
+async def test_admin_cannot_self_approve_category_c(
+    async_engine,
+    session_factory,
+) -> None:
+    """Regression test: even ADMIN users must be blocked from self-approving Category C."""
+    import uuid
+    from datetime import timedelta
+    from httpx import ASGITransport, AsyncClient
+    from app.core.database import utcnow
+    from app.core.security import hash_password
+    from app.main import create_app
+    from app.models import Approval, ApprovalCategory, ApprovalStatus, User, UserRole
+
+    app = create_app(
+        engine=async_engine,
+        session_factory=session_factory,
+        bootstrap_env_tokens=False,
+    )
+    app.state.require_auth_override = True
+
+    async with session_factory() as session:
+        admin = User(
+            email=f"admin_{uuid.uuid4().hex[:6]}@releaseguard.local",
+            display_name="Admin Operator",
+            role=UserRole.ADMIN,
+            password_hash=hash_password("AdminPass!123"),
+        )
+        session.add(admin)
+        await session.flush()
+        app_req = Approval(
+            requested_by_id=admin.id,
+            policy_category=ApprovalCategory.C,
+            action_type="flagsmith_toggle_flag",
+            target_resource_type="feature_flag",
+            target_resource_id=str(uuid.uuid4()),
+            environment_name="production",
+            title="Enable checkout_v2 in production",
+            rationale="Regression test",
+            action_payload={"flag_key": "checkout_v2", "environment_name": "production", "enabled": True},
+            expected_precondition={"enabled": False},
+            action_hash=f"hash_{uuid.uuid4().hex}",
+            idempotency_key=f"idem_{uuid.uuid4().hex}",
+            status=ApprovalStatus.PENDING,
+            expires_at=utcnow() + timedelta(minutes=15),
+        )
+        session.add(app_req)
+        await session.commit()
+        admin_email = admin.email
+        app_id = app_req.id
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        login_r = await client.post(
+            "/api/v1/auth/login",
+            json={"email": admin_email, "password": "AdminPass!123"},
+        )
+        assert login_r.status_code == 200
+        tok = login_r.json()["access_token"]
+        r = await client.post(
+            f"/api/v1/approvals/{app_id}/approve",
+            headers={"Authorization": f"Bearer {tok}"},
+            json={"comment": "Attempting self-approval"},
+        )
+        assert r.status_code == 403
+        assert r.json()["error"]["code"] == "SELF_APPROVAL_FORBIDDEN"

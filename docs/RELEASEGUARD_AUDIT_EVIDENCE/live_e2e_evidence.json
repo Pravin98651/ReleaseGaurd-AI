@@ -1,0 +1,158 @@
+{
+  "executed_at": "2026-11-27T07:00:11.166361+00:00",
+  "environment": "development",
+  "checks": {
+    "health_and_unauth": {
+      "health_status": 200,
+      "health_body": {
+        "status": "ok",
+        "database": "postgresql",
+        "gemini_configured": true,
+        "github_connected": true,
+        "flagsmith_connected": true,
+        "analytics_mode": "flagsmith_native"
+      },
+      "unauth_repositories_status": 401
+    },
+    "auth": {
+      "operator_login_status": 200,
+      "reviewer_login_status": 200
+    },
+    "nl_feature_request_plan": {
+      "status_code": 201,
+      "recommended_flag_key": "checkout_experience_v2",
+      "flag_type": "MULTIVARIATE",
+      "safe_default": {
+        "enabled": false,
+        "value": "control"
+      },
+      "release_key": "REL-2026-0005",
+      "evidence_class": "AI_INFERRED"
+    },
+    "identity_explainer": {
+      "status_code": 200,
+      "identifier": "user_123",
+      "consistent_on_repeat_evaluation": true,
+      "traits_redacted": {
+        "subscription_plan": "beta",
+        "api_token": "[REDACTED]"
+      },
+      "flag_explanations_count": 11,
+      "sample_explanation": {
+        "flag_key": "checkout_experience_v2",
+        "enabled": true,
+        "value": "control",
+        "result": "control",
+        "fallback_default": {
+          "enabled": false,
+          "value": "control"
+        },
+        "evaluation_source": "OBSERVED_EDGE_API",
+        "explanation_source": "INFERRED_FROM_EDGE_RESPONSE",
+        "explanation": "Observed via Flagsmith Edge API: enabled in environment default or matching segment."
+      }
+    },
+    "supervisor_orchestration": {
+      "session_id": "26780bd8-8a9a-43bd-8401-67897145cd64",
+      "task_id": "65cd6e51-b525-4786-b9c3-883b8be2acc0",
+      "specialist": "supervisor",
+      "status": "completed",
+      "steps_count": 6,
+      "final_response_preview": "Here is the evaluation of feature flags for identity **`user_123`** in the **`development`** environment, as evaluated live via the Flagsmith Edge API. \n\n*(Note: The flag evaluation states and values are directly **observed from the Flagsmith Edge API**, whereas the underlying rule/segment attributi",
+      "error_message": null
+    },
+    "policy_and_approval_gates": {
+      "prod_mutation_status": 202,
+      "approval_id": "3f016853-b6ec-4068-addc-95410be63bff",
+      "self_approval_attempt": {
+        "status_code": 403,
+        "body": {
+          "error": {
+            "code": "SELF_APPROVAL_FORBIDDEN",
+            "message": "Category C approvals require an independent approver (requested_by_id != decided_by_id).",
+            "details": {},
+            "request_id": "req_eb9f89dabd04",
+            "retryable": false,
+            "timestamp": "2026-11-27T07:00:19.709101+00:00"
+          }
+        }
+      },
+      "reviewer_rejection": {
+        "status_code": 200,
+        "status": "rejected"
+      }
+    },
+    "deterministic_analytics": {
+      "experiment_id": "73ebeafa-9192-4bb3-98b1-193039c5827d",
+      "numeric_bayesian_identical": true,
+      "diff_keys": [],
+      "outcome": "VARIANT_WINS",
+      "control_exposures": 120,
+      "treatment_exposures": 120
+    },
+    "drift_detection": {
+      "approval_created_status": 202,
+      "drift_approve_status": 409,
+      "drift_body": {
+        "error": {
+          "code": "APPROVAL_REVALIDATION_FAILED",
+          "message": "Live external state drifted since approval was requested.",
+          "details": {
+            "expected": {
+              "enabled": false,
+              "flag_key": "audit_drift_cdb11c",
+              "is_archived": false,
+              "version_uuid": "32b9a4c9-58ff-4832-b48c-0590123bd96a",
+              "environment_name": "development",
+              "rollout_percentage": 0
+            },
+            "actual": {
+              "enabled": true,
+              "feature_state_value": null,
+              "rollout_percentage": 100,
+              "mv_allocations": {},
+              "states_count": 1,
+              "version_uuid": "4513f7ea-b0c6-4493-be18-12a6298d08b6"
+            },
+            "mismatches": [
+              "Expected base enabled=False, got True.",
+              "Expected 0% rollback (base and segment overrides disabled).",
+              "Expected version_uuid=32b9a4c9-58ff-4832-b48c-0590123bd96a, got 4513f7ea-b0c6-4493-be18-12a6298d08b6."
+            ]
+          },
+          "request_id": "req_9b352cb4e75f",
+          "retryable": false,
+          "timestamp": "2026-11-27T07:01:04.429987+00:00"
+        }
+      }
+    },
+    "github_live_state": {
+      "open_prs_count": 0
+    },
+    "frontend_routes": {
+      "/dashboard": 200,
+      "/command-center": 200,
+      "/agent": 200,
+      "/pull-requests": 200,
+      "/flagsmith": 200,
+      "/feature-flags": 200,
+      "/experiments": 200,
+      "/approvals": 200,
+      "/progressive-delivery": 200,
+      "/releases": 200,
+      "/flag-health": 200,
+      "/risk-intelligence": 200,
+      "/repositories": 200,
+      "/metrics": 200,
+      "/intelligence": 200,
+      "/organization": 200,
+      "/notifications": 200,
+      "/schedules": 200,
+      "/integrations": 200,
+      "/audit-logs": 200,
+      "/system-health": 200,
+      "/settings": 200,
+      "novashop:/": 200
+    }
+  }
+}
