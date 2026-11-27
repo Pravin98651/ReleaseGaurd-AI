@@ -79,6 +79,7 @@ def _issue_session_response(response: Response, user: User) -> AuthTokenResponse
 @auth_router.get("/status", response_model=AuthStatusResponse)
 async def get_auth_status(
     request: Request,
+    response: Response,
     session: DBSession,
 ) -> AuthStatusResponse:
     """Return whether Control Plane auth is enforced and resolve caller session if present."""
@@ -87,8 +88,11 @@ async def get_auth_status(
     user: User | None = None
     try:
         user = await resolve_optional_token_user(request, session)
-    except APIException:
+    except Exception:  # noqa: BLE001
         user = None
+
+    if user is None and request.cookies.get("rg_session"):
+        response.delete_cookie("rg_session", path="/")
 
     return AuthStatusResponse(
         require_auth=is_auth_required(request),

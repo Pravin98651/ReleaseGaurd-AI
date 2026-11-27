@@ -219,6 +219,9 @@ async function requestJson<T>(
   if (!res.ok) {
     if (res.status === 401 && !path.startsWith("/api/v1/auth/login")) {
       setStoredAuthToken(null);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new CustomEvent("rg:refresh-status"));
+      }
     }
     if (parsed && typeof parsed === "object" && "error" in parsed) {
       const errObj = (parsed as { error: Record<string, unknown> }).error;
